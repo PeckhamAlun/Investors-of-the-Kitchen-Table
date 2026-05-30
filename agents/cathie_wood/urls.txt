@@ -1,0 +1,51 @@
+# ============================================================
+# Cathie Wood — YouTube source URLs
+# Rebuilt from philosophy/transcripts/manifest.json
+# One URL per line. "#" starts a comment.
+# ============================================================
+
+# --- Previously ingested successfully (21) ---
+https://www.youtube.com/watch?v=Ol_Z24Wtv1g
+https://www.youtube.com/watch?v=mdy7CReGdB8
+https://www.youtube.com/watch?v=UeOL0PY7rR4
+https://www.youtube.com/watch?v=u4z6BUKNGu8
+https://www.youtube.com/watch?v=WOwUx1nsHtg
+https://www.youtube.com/watch?v=C4rmXs-O-O0
+https://www.youtube.com/watch?v=zO0rb3IRyEA
+https://www.youtube.com/watch?v=W7c0mWupAVc
+https://www.youtube.com/watch?v=4PfgnFTBfAE
+https://www.youtube.com/watch?v=EIrexTvoCd8
+https://www.youtube.com/watch?v=LvWaxAux9hk
+https://www.youtube.com/watch?v=Uw32aVFWEss
+https://www.youtube.com/watch?v=Nf5MQz7Awlw
+https://www.youtube.com/watch?v=iCh5oy-TonQ
+https://www.youtube.com/watch?v=VrCkU2SR3RU
+https://www.youtube.com/watch?v=TogDlICXfAU
+https://www.youtube.com/watch?v=qIvPRS7xnT4
+https://www.youtube.com/watch?v=vC4SfeTtsOM
+https://www.youtube.com/watch?v=0JqBeQj7hEY
+https://www.youtube.com/watch?v=_2mrbFMrpZI
+https://www.youtube.com/watch?v=fVLlCGc139c
+
+# --- Previously FAILED under Whisper (21) — caption-first may recover these ---
+https://www.youtube.com/watch?v=hsE4ds1MGRU
+https://www.youtube.com/watch?v=U3aVaJkYf8o
+https://www.youtube.com/watch?v=AA66jQAoFig
+https://www.youtube.com/watch?v=9J5iQXqIYnc
+https://www.youtube.com/watch?v=PHfk25Xy6jU
+https://www.youtube.com/watch?v=PfYu555w3OY
+https://www.youtube.com/watch?v=9xCYIqYbxgU
+https://www.youtube.com/watch?v=QICt00EuVeY
+https://www.youtube.com/watch?v=2iUxGm6hYAc
+https://www.youtube.com/watch?v=_biOpLvMtRA
+https://www.youtube.com/watch?v=JMBOw2Vzim0
+https://www.youtube.com/watch?v=dnYBsU6e-p4
+https://www.youtube.com/watch?v=kSmWzgqgKQk
+https://www.youtube.com/watch?v=oNJ_ouDNNT0
+https://www.youtube.com/watch?v=wTKHzbLQfyc
+https://www.youtube.com/watch?v=_NRg47lxqR0
+https://www.youtube.com/watch?v=mHzCIGMvie8
+https://www.youtube.com/watch?v=yudWiDY1ZDU
+https://www.youtube.com/watch?v=FimyxQONiiI
+https://www.youtube.com/watch?v=KVkl_WjsMVI
+https://www.youtube.com/watch?v=q_V69NrvKuw
