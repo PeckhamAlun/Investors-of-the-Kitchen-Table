@@ -6,6 +6,10 @@
 ==============================================================================
 """
 
+# Load environment variables from .env file (must run before anything reads them)
+from dotenv import load_dotenv
+load_dotenv()
+
 import os
 
 # ==============================================================================
@@ -45,15 +49,31 @@ def system_prompt_path(agent_name):
 def company_dir(company_name):
     return os.path.join(COMPANIES_DIR, company_name.lower().replace(" ", "_"))
 
+# Known camel-case company names that .title() would mangle (mongodb -> Mongodb).
+# Keys are lowercased; values are the canonical stored/display form.
+COMPANY_NAME_OVERRIDES = {
+    "mongodb":     "MongoDB",
+    "datadog":     "Datadog",
+    "adobe":       "Adobe",
+    "crowdstrike": "CrowdStrike",
+    "servicenow":  "ServiceNow",
+    "salesforce":  "Salesforce",
+}
+
 def normalize_company(name):
     """
     Canonical company key — used for BOTH ingestion (the stored metadata) and
     retrieval (the where-filter). Routing every write and read through this one
     function guarantees the stored name and the query filter can never diverge,
     so a --company arg in any casing (datadog, DATADOG, DataDog) always matches
-    the ingested data. Returns None/empty unchanged.
+    the ingested data. Known camel-case names are preserved via
+    COMPANY_NAME_OVERRIDES; everything else falls back to .title().
+    Returns None/empty unchanged.
     """
-    return name.strip().title() if name else name
+    if not name:
+        return name
+    key = name.lower().strip()
+    return COMPANY_NAME_OVERRIDES.get(key, name.strip().title())
 
 # ==============================================================================
 # EMBEDDING MODEL
@@ -120,6 +140,14 @@ AGENT_REGISTRY = {
     "peter_lynch": {
         "display": "Peter Lynch",
         "colour":  (0.13, 0.45, 0.20),   # Fidelity green
+    },
+    "howard_marks": {
+        "display": "Howard Marks",
+        "colour":  (0.70, 0.15, 0.15),   # deep red — Oaktree
+    },
+    "ray_dalio": {
+        "display": "Ray Dalio",
+        "colour":  (0.12, 0.42, 0.46),   # slate teal — Bridgewater
     },
     "munger": {
         "display": "Charlie Munger",

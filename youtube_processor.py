@@ -96,17 +96,34 @@ def download_audio(url):
 
 
 def transcribe(audio_path):
-    """Transcribe audio with Whisper large-v3."""
+    """Transcribe audio with Whisper large-v3 on the GPU (CUDA required).
+
+    GPU-only by design: if no CUDA device is visible we raise rather than fall
+    back to CPU — transcribing large-v3 on CPU is unacceptably slow. If this
+    fires, the installed PyTorch is the CPU-only build; install a CUDA wheel
+    (e.g. `torch==2.12.0+cu126`).
+    """
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "CUDA GPU not available — refusing to transcribe on CPU. "
+            "The installed PyTorch has no CUDA support; install a CUDA build, "
+            "e.g.: py -3.11 -m pip install torch==2.12.0+cu126 "
+            "--index-url https://download.pytorch.org/whl/cu126"
+        )
+
     # --- DEBUG ---
     print("🐞 [DEBUG] transcribe() received:")
     print(f"🐞   audio_path:      {audio_path!r}")
     print(f"🐞   os.path.abspath: {os.path.abspath(audio_path)!r}")
     print(f"🐞   exists? {os.path.exists(audio_path)}")
     # --- END DEBUG ---
-    print(f"🎧 Loading Whisper ({WHISPER_MODEL}) — first run downloads the model, may take a while...")
-    model = whisper.load_model(WHISPER_MODEL)
-    print("📝 Transcribing (this is the slow part)...")
-    result = model.transcribe(audio_path, verbose=True)
+    gpu_name = torch.cuda.get_device_name(0)
+    print(f"🎧 Loading Whisper ({WHISPER_MODEL}) on GPU [{gpu_name}] — first run downloads the model, may take a while...")
+    model = whisper.load_model(WHISPER_MODEL, device="cuda")
+    print("📝 Transcribing on GPU (this is the slow part)...")
+    result = model.transcribe(audio_path, verbose=True, fp16=True)
     return result["text"].strip()
 
 

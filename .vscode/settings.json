@@ -2,5 +2,10 @@
   // Auto-save edits to disk shortly after you stop typing, and whenever the
   // editor loses focus (switching files/windows). No more lost unsaved buffers.
   "files.autoSave": "afterDelay",
-  "files.autoSaveDelay": 1000
+  "files.autoSaveDelay": 1000,
+
+  // Load environment variables from the project .env into the integrated
+  // terminal and Python tooling (so ANTHROPIC_API_KEY etc. are available).
+  "python.terminal.useEnvFile": true,
+  "python.envFile": "${workspaceFolder}/.env"
 }

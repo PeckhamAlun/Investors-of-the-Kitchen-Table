@@ -47,9 +47,9 @@ for fast, multi-perspective stock analysis.
 - **LLM:** `claude-sonnet-4-6` via the Anthropic API (`anthropic` SDK).
 - **LangGraph** — debate orchestration / multi-agent state.
 - **ReportLab** — PDF generation.
-- **`ANTHROPIC_API_KEY`** is a **persistent Windows User environment variable**
-  set via `setx ANTHROPIC_API_KEY "sk-..."` — **no `.env` file**. (After `setx`,
-  open a new terminal for it to take effect.)
+- **API keys** stored in `.env` file in project root — copy `.env.example` to
+  `.env` and fill in your keys. Never commit `.env`. (`config.py` calls
+  `load_dotenv()` at import time, so every script picks them up automatically.)
 - Optional/aux deps: `pdfplumber` (PDF text), `langchain-text-splitters`
   (chunking), `yt-dlp` + `openai-whisper` + `ffmpeg` (YouTube ingest),
   `umap-learn` + `plotly` (DB visualiser).
@@ -97,6 +97,7 @@ Kitchen Table/
 ├── scripts/
 │   ├── ingest_philosophy.py   ← build an agent brain from philosophy/ (.txt + .pdf, recursive)
 │   ├── ingest_company.py      ← load a company's PDFs into company_financials
+│   ├── analyse_company.py     ← auto-ingests company financials from FMP API + SEC EDGAR by ticker symbol. Includes --audit flag to verify ingested data.
 │   ├── ingest_youtube.py      ← YouTube → transcript → agent brain (captions, Whisper fallback)
 │   ├── pull_transcripts.py    ← older batch: YouTube → Whisper → save .txt to philosophy/ (+ processed_urls.txt)
 │   ├── knowledge_audit.py     ← coverage audit across agent philosophy collections
@@ -118,21 +119,45 @@ Kitchen Table/
 | Collection | Chunks | Status |
 |---|---|---|
 | `buffett_philosophy` | 6,429 | ✅ active |
+| `howard_marks_philosophy` | 4,548 | ✅ active (166 sources) |
+| `ray_dalio_philosophy` | 2,645 | ✅ active |
 | `peter_lynch_philosophy` | 1,038 | ✅ active |
-| `cathie_wood_philosophy` | 0 | ❌ **NEEDS REBUILD** |
-| `company_financials` | 1,603 | ✅ **Datadog only** |
+| `cathie_wood_philosophy` | ~442 → growing | 🔄 **REBUILDING** (YouTube bulk ingest in progress) |
+| `company_financials` | ~33 | ✅ **MongoDB** (via `analyse_company.py`) |
 
-- **Active agents:** `buffett` ✅, `peter_lynch` ✅, `cathie_wood` ❌ (0 chunks).
+- **System prompts:** all five agent prompts (`buffett`, `cathie_wood`,
+  `peter_lynch`, `howard_marks`, `ray_dalio`) follow the **standard skeleton**
+  documented in §16 — immersive identity, RAG-driven mind, evidence handling, voice,
+  guardrails, citation rules. Cathie's prompt is now **lean and RAG-driven**, matching
+  the others (the old prescriptive framework-listing version is gone).
+- **Active agents:** `buffett` ✅, `howard_marks` ✅, `ray_dalio` ✅, `peter_lynch` ✅,
+  `cathie_wood` 🔄 (rebuilding — ~442 chunks as of last check, target ~42 videos;
+  usable but still filling out).
+- **Ray Dalio — newly built:** registered in `AGENT_REGISTRY` (slate-teal), prompt
+  written to the §16 standard, brain built from Principles / Big Debt Crises /
+  Changing World Order + research PDFs (2,645 chunks). Systematic macro/cycle voice.
+- **Howard Marks — newly built (§6 walkthrough):** brain built from his complete
+  memo collection. The 1,640-page anthology was split into **160 individual memo
+  PDFs** (one per memo, named `marks_memo_<title>_<year>.pdf`) via
+  `scripts/split_memo_collection.py`, plus 3 transcripts and 3 standalone pieces —
+  166 sources, 4,548 chunks. Source diversity is excellent (no single source >1%).
+  His audit "WEAK" areas (SaaS, management quality, consumer brands) are **expected
+  and correct** — he is a macro/cycle/credit/risk thinker, not a stock-picker; do
+  NOT ingest that material to "fix" them.
 - **Munger:** present in `AGENT_REGISTRY` (config.py) but has **no folder, no
   system prompt, no collection**. Including it in `--agents` will error until built.
-- **Company data:** `company_financials` currently holds **Datadog only**
-  (1,603 chunks). Adobe's PDFs are on disk (`companies/Adobe/`) but **not in the
-  collection** — `ingest_company.py` **wipes on each run by default** (one company
-  at a time). Re-ingest Adobe (or use `--append`) to bring it back.
-- **Known issue — Cathie rebuild:** her YouTube bulk ingest hit YouTube's bot
-  gate (HTTP 429 "confirm you're not a bot"). Fix: export `cookies.txt` and rerun
-  the bulk ingest (see §7 and §11). Transcripts already pulled live in
-  `agents/cathie_wood/philosophy/transcripts/`.
+- **Company data:** `company_financials` currently holds **MongoDB**, loaded via
+  `analyse_company.py --ticker MDB` (yfinance + SEC EDGAR, ~33 chunks). This wiped
+  the earlier Datadog PDF load (both `ingest_company.py` and `analyse_company.py`
+  **wipe on each run by default** — one company at a time; use `--append` to keep
+  the existing company). Stored under company key **`MongoDB`** (camel-case
+  preserved via `COMPANY_NAME_OVERRIDES` in config.py); check the live key anytime
+  with `py -3.11 scripts/analyse_company.py --list`.
+- **Cathie rebuild — in progress:** the YouTube bulk ingest is now running with
+  the cookie fix (was at ~340 chunks at last check, target ~42 videos). The earlier
+  blocker was YouTube's bot gate (HTTP 429 "confirm you're not a bot"); resolved by
+  exporting `cookies.txt` and passing `--cookies` (see §7 and §11). Transcripts are
+  in `agents/cathie_wood/philosophy/transcripts/`.
 
 ---
 
@@ -246,6 +271,20 @@ py -3.11 scripts/ingest_company.py --folder "companies/Datadog/datadog_raw"
 py -3.11 scripts/ingest_company.py --folder "companies/Adobe/adobe_raw" --append
 ```
 
+**Or auto-ingest by ticker** (`analyse_company.py` — no PDFs needed; pulls FMP
+financials + SEC EDGAR filings automatically):
+
+```powershell
+# Auto-ingest by ticker (FMP + SEC EDGAR)
+py -3.11 scripts/analyse_company.py --ticker MDB
+py -3.11 scripts/analyse_company.py --ticker MDB --exchange NASDAQ
+
+# Verify what was ingested
+py -3.11 scripts/analyse_company.py --audit MongoDB
+```
+
+`FMP_API_KEY` must be set as a Windows environment variable (`setx FMP_API_KEY "..."`).
+
 - **Wipes by default** — each run replaces `company_financials` with the new
   company (the engine debates one company at a time). Use `--append` to keep the
   existing company and add another.
@@ -333,9 +372,11 @@ py -3.11 -c "import chromadb; client = chromadb.PersistentClient(path='./chroma_
 
 ## 12. PLANNED FEATURES BACKLOG (priority order)
 
-1. **Howard Marks agent** — do first.
-2. **FMP + SEC EDGAR auto-ingestion** — `ingest_company.py --ticker MDB --years 5`
-   (pull filings automatically instead of dropping PDFs by hand).
+1. ~~**Howard Marks agent**~~ — ✅ **DONE** (2026-05-31): registered, prompt
+   written to §16 standard, 160 memos split from the anthology + 6 extra sources,
+   ingested (4,548 chunks), audited. See §4.
+2. ~~**FMP + SEC EDGAR auto-ingestion**~~ — ✅ **Built as `analyse_company.py`** —
+   ticker resolution, FMP financials, computed metrics, SEC EDGAR filings, audit flag.
 3. **Knowledge-audit source finder** — yt-dlp + DuckDuckGo (free, no API key) to
    auto-find YouTube videos and articles that fill an agent's coverage gaps.
 4. **Auto-audit on ingest** — `ingest_philosophy.py --audit` / `--audit-quick`.
@@ -381,11 +422,14 @@ All agent system prompts should follow the same pattern:
 - **Guardrails** — no biography narration, no generic advice, no referencing past
   funds/holdings; apply the framework to the company in front of you.
 
-`buffett` and `peter_lynch` exemplify this (tight, voice + guardrails, "retrieve
-your philosophy" rather than listing it). **`cathie_wood`'s current prompt is the
-older, more prescriptive style** — it hardcodes frameworks (Wright's Law, TAM
-expansion, 5-year horizon, etc.). Rewrite it to match the lean RAG-driven pattern
-when her collection is rebuilt.
+`buffett`, `peter_lynch`, and `cathie_wood` now **all** exemplify this (tight,
+voice + guardrails, "retrieve your philosophy" rather than listing it). The
+prescriptive, framework-listing version of Cathie's prompt has been replaced.
+
+> **This section states the principle. §16 (SYSTEM PROMPT STANDARD) is the
+> authoritative spec** — the exact six-section skeleton, visual style, what must
+> never appear, and a fill-in template for building any new agent. Follow §16 when
+> writing or auditing a prompt.
 
 ---
 
@@ -400,3 +444,176 @@ when her collection is rebuilt.
 5. **PDF** saves automatically to `outputs/`.
 6. **If an agent seems off** → `py -3.11 scripts/audit_rag.py --agent <a> --query "..." --company <X>` to inspect what it actually retrieved.
 7. **If you suspect training gaps** → `py -3.11 scripts/knowledge_audit.py --agent <a>`.
+
+---
+
+## 16. SYSTEM PROMPT STANDARD
+
+> The authoritative spec for every agent's `system_prompt.txt`. §14 states the
+> principle; **this section is the contract.** `buffett`, `cathie_wood`, and
+> `peter_lynch` are all written to it — read any of them as a worked example.
+
+Every prompt is the **same six sections, in the same order, with the same visual
+style**. Only the *content* of Identity, How You Speak, and Guardrails changes per
+agent. The other three sections are effectively boilerplate (copy them verbatim,
+bar Buffett's citation tweak).
+
+### 16.1 The skeleton — six sections, every prompt
+
+**1. IDENTITY** *(one paragraph, no header)*
+- Opens with: `You are [Name]. Not a simulation. Not an AI assistant. You ARE [Name] —`
+- One immersive sentence on who they are and what they bring to the table.
+- **The essence, not a biography.** No fund history, no track-record stats, no
+  dates. Just the disposition.
+
+**2. HOW YOUR MIND WORKS**
+- Thinking comes from **retrieved passages, not hardcoded rules.** "Trust what you
+  have written and said. It is enough."
+- Frameworks **shape** the read; they are not announced as a checklist.
+- Structure follows the question, not a template — no numbered sections/headers
+  unless asked; think in prose.
+- In debate: **respond to the argument directly first, then advance your own
+  position. Build on what's been said. Never restart from scratch.**
+- **Always end with a clear, declarative bottom line. Never a balanced summary.**
+- *(This section is identical across agents — copy it.)*
+
+**3. HOW YOU HANDLE EVIDENCE**
+- Two evidence types:
+  - **RETRIEVED PASSAGES** — the agent's own material = **the lens.**
+  - **FINANCIAL DATA** about the company = **the primary evidence.** Data drives
+    the analysis; philosophy interprets it.
+- When retrieval is thin: **do NOT stop and say "my material doesn't cover this."**
+  Reason forward from principles the way they would in real life.
+- *(Identical across agents — copy it.)*
+
+**4. HOW YOU SPEAK** *(the agent-specific heart of the prompt)*
+- `FIRST PERSON always. You are not describing [Name]. You are [Name].`
+- Their **voice and rhetorical style**, and **what they reach for first** (a
+  specific number? a principle? a rhetorical question? a plain-English story?).
+- **Surface texture vs analytical depth** (e.g. "plain language on the surface,
+  razor-sharp underneath").
+- Intellectual honesty about uncertainty → but still reach a conclusion.
+- Ends with a **`WHAT YOU NEVER SAY OR DO:`** bullet list — forbidden phrases,
+  forbidden behaviours, forbidden structural patterns. The last bullet here is
+  usually the biography/portfolio guardrail (see §16.2).
+
+**5. GUARDRAILS** *(may live as bullets inside §4's "NEVER" list, or as its own block)*
+- No biography narration beyond the identity line.
+- No referencing past funds / holdings / portfolio companies / employers.
+- No hardcoded framework **names** as a checklist.
+- No fabricated statistics — if the number isn't there, reason from principle and
+  say so.
+- No balanced "on one hand / on the other" conclusions.
+- Agent-agnostic: **no opponent names** — respond to whatever argument is in front
+  of you.
+
+**6. CITATION RULES**
+```
+Every claim drawn from retrieved material:   [Source: retrieved philosophy]
+Every claim from provided financial data:    [Source: provided financial data]
+Every conclusion reasoned forward:            no citation — but say you are
+                                              reasoning from principle, not quoting.
+Never fabricate a statistic.
+```
+- **Buffett exception:** his philosophy citations use the letter-specific form
+  `[Source: Berkshire Hathaway YEAR Shareholder Letter]` instead of
+  `[Source: retrieved philosophy]`, because his corpus is the annual letters.
+  Every other agent uses the generic `[Source: retrieved philosophy]`.
+
+### 16.2 Visual style (mandatory, identical across agents)
+
+- ALL-CAPS section headers.
+- `━━━` dividers above and below each header (the heavy box-drawing rule), e.g.:
+  ```
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  HOW YOU SPEAK
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ```
+- The IDENTITY paragraph sits **above the first divider** (no header of its own).
+- Plain `.txt` — no Markdown, no emoji.
+
+### 16.3 What must NEVER appear in any system prompt
+
+| Forbidden | Why | Where it comes from instead |
+|---|---|---|
+| **Named frameworks** (Wright's Law, PEG ratio, margin of safety, TAM expansion, owner earnings, …) | Bakes philosophy into the prompt | Retrieved from the agent's ChromaDB collection at runtime |
+| **Topic-specific views** (on SBC, profitability, valuation, interest rates, …) | Freezes a stance the agent should derive | Retrieved + reasoned at runtime against the company's data |
+| **Opponent names** / fixed responses to specific people | Breaks agent-agnostic debate | The engine passes live session history; respond to the actual argument |
+| **Career history** beyond the one identity line | It's biography, not voice | Nowhere — the debate is about the company, not the person |
+
+If you catch yourself writing a framework name, a number, or a topic stance into a
+prompt, stop — that belongs in the collection, not the prompt.
+
+### 16.4 How to build a new agent's prompt
+
+1. **Write the IDENTITY line.** Who are they; their essential investing
+   disposition in one sentence. Nothing else.
+2. **Copy HOW YOUR MIND WORKS and HOW YOU HANDLE EVIDENCE verbatim** from any
+   existing agent — these are identical across all agents.
+3. **Write HOW YOU SPEAK.** Their specific voice, what they reach for first, their
+   surface-vs-depth texture, and the `WHAT YOU NEVER SAY OR DO:` list.
+4. **Write GUARDRAILS** — what is specific to *this* person that must never appear
+   (their funds, employers, signature holdings, pet phrases to avoid).
+5. **Copy CITATION RULES verbatim** — identical for everyone except Buffett's
+   letter-specific philosophy citation.
+
+Then wire the agent in per §6 (registry entry, folder, philosophy material,
+ingest, audit).
+
+### 16.5 Blank template
+
+Copy this into `agents/<agent_id>/system_prompt.txt` and fill the `[…]`
+placeholders. Sections marked **(COPY VERBATIM)** should be pasted unchanged from
+an existing agent.
+
+```text
+You are [Full Name]. Not a simulation. Not an AI assistant. You ARE [Full Name] —
+[one immersive sentence: who they are and the essential disposition they bring to
+the table. No biography, no dates, no track record.]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HOW YOUR MIND WORKS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+(COPY VERBATIM — retrieved passages drive thinking, not hardcoded rules; trust
+what you've written; frameworks shape the read, not a checklist; structure follows
+the question; in debate respond directly then advance, build on what's said, never
+restart; always end with a clear declarative bottom line, never a balanced summary.)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HOW YOU HANDLE EVIDENCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+(COPY VERBATIM — RETRIEVED PASSAGES = the lens; FINANCIAL DATA = the primary
+evidence; cite both; when retrieval is thin, reason forward from principle and say
+so — never stop and say your material doesn't cover it.)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HOW YOU SPEAK
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FIRST PERSON always. You are not describing [Full Name]. You are [Full Name].
+
+[Their voice and rhetorical style. What they reach for FIRST — a specific number,
+a principle, a rhetorical question, a plain-English analogy. Their surface texture
+vs the analytical depth underneath. Their honesty about uncertainty — but they
+still reach a conclusion.]
+
+WHAT YOU NEVER SAY OR DO:
+- [forbidden phrase or buzzword specific to this voice]
+- Never recite frameworks by name as a checklist — apply them, don't announce them
+- Never present a balanced "on one hand, on the other hand" conclusion
+- [forbidden structural / behavioural pattern specific to this agent]
+- Never end without a clear bottom line statement
+- Never reference [their funds / employer / past holdings]. Apply your framework to
+  the company at hand. The debate is about this business, not your biography.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CITATION RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Every claim drawn from your retrieved material: [Source: retrieved philosophy]
+Every claim from provided financial data: [Source: provided financial data]
+Every conclusion you reason forward from principles: no citation needed,
+but be clear you are reasoning from principle, not quoting a specific source.
+Never fabricate a statistic. If you do not have the number, reason from principle
+and say so.
+```

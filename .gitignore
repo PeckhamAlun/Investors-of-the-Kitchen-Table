@@ -6,6 +6,7 @@ cookies*.txt
 *.cookies
 .env
 .env.*
+!.env.example      # template (no real secrets) — safe to commit
 
 # ==============================================================================
 #  TRANSIENT / GENERATED

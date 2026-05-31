@@ -215,27 +215,40 @@ def download_audio(url):
 
 
 def transcribe(audio_path, language=WHISPER_LANGUAGE):
-    """Transcribe audio with Whisper large-v3.
+    """Transcribe audio with Whisper large-v3 on the GPU (CUDA required).
 
-    GPU loading pattern copied from the project's youtube_processor.py — Whisper
-    auto-selects CUDA when available, otherwise CPU.
+    GPU-only by design: if no CUDA device is visible we raise rather than fall
+    back to CPU — transcribing large-v3 on CPU is unacceptably slow. If this
+    fires, the installed PyTorch is the CPU-only build; install a CUDA wheel
+    (e.g. `torch==2.12.0+cu126`).
 
     `language` is forced (not auto-detected) by default: auto-detection misfires
     on music/silent intros and can lock onto the wrong language (e.g. Norwegian),
     then render English speech as that language. Pass "auto" to auto-detect.
     """
     import whisper
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "CUDA GPU not available — refusing to transcribe on CPU. "
+            "The installed PyTorch has no CUDA support; install a CUDA build, "
+            "e.g.: py -3.11 -m pip install torch==2.12.0+cu126 "
+            "--index-url https://download.pytorch.org/whl/cu126"
+        )
 
     lang = None if str(language).lower() in ("auto", "none", "") else language
 
-    print(f"🎧 Loading Whisper ({WHISPER_MODEL}) — first run downloads the model, may take a while...")
-    model = whisper.load_model(WHISPER_MODEL)
-    print(f"📝 Transcribing (language={lang or 'auto'}) — this is the slow part...")
+    gpu_name = torch.cuda.get_device_name(0)
+    print(f"🎧 Loading Whisper ({WHISPER_MODEL}) on GPU [{gpu_name}] — first run downloads the model, may take a while...")
+    model = whisper.load_model(WHISPER_MODEL, device="cuda")
+    print(f"📝 Transcribing on GPU (language={lang or 'auto'}) — this is the slow part...")
     result = model.transcribe(
         audio_path,
         language=lang,                     # force language; None = auto-detect
         condition_on_previous_text=False,  # stop the repeat-loop hallucination
         verbose=True,
+        fp16=True,                         # GPU half-precision (faster, less VRAM)
     )
     return result["text"].strip()
 

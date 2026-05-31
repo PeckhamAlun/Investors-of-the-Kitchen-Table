@@ -49,8 +49,8 @@ from config import (
 
 DEFAULT_AGENTS      = ["buffett", "cathie_wood"]
 DEFAULT_TURNS       = 5
-MAX_CONTEXT_CHARS   = 6000
-DEBATE_MAX_TOKENS   = 800
+MAX_CONTEXT_CHARS   = 8000
+DEBATE_MAX_TOKENS   = 1200
 
 
 def display_name(agent: str) -> str:
@@ -926,62 +926,67 @@ Examples:
     all_rounds      = []   # for PDF: [{round, topic, title, history}]
     round_num       = 1
 
-    while True:
-        print(f"\n  {'='*56}")
-        print(f"  KITCHEN TABLE — ROUND {round_num}")
-        print(f"  {'='*56}")
-        print(f"  Topic      : {topic}")
-        print(f"  Company    : {company or 'None'}")
-        print(f"  Agents     : {' vs '.join(display_name(a) for a in agents)}")
-        print(f"  Turns each : {turns}  ({turns * len(agents)} total responses)")
-        print(f"  {'='*56}")
+    try:
+        while True:
+            print(f"\n  {'='*56}")
+            print(f"  KITCHEN TABLE — ROUND {round_num}")
+            print(f"  {'='*56}")
+            print(f"  Topic      : {topic}")
+            print(f"  Company    : {company or 'None'}")
+            print(f"  Agents     : {' vs '.join(display_name(a) for a in agents)}")
+            print(f"  Turns each : {turns}  ({turns * len(agents)} total responses)")
+            print(f"  {'='*56}")
 
-        # Generate clean section title for PDF
-        round_title = generate_round_title(topic, anthropic_client)
-        print(f"  Section    : {round_title}")
+            # Generate clean section title for PDF
+            round_title = generate_round_title(topic, anthropic_client)
+            print(f"  Section    : {round_title}")
 
-        # Run the round — passes full session history in
-        session_history = run_round(
-            topic, company, agents, turns, round_num, session_history, audit=args.audit
-        )
+            # Run the round — passes full session history in
+            session_history = run_round(
+                topic, company, agents, turns, round_num, session_history, audit=args.audit
+            )
 
-        # Extract just this round's entries for PDF
-        round_history = [h for h in session_history if h.get("round") == round_num]
-        if round_history:  # only add if there's actual content
-            all_rounds.append({
-                "round":   round_num,
-                "topic":   topic,
-                "title":   round_title,
-                "history": round_history,
-            })
+            # Extract just this round's entries for PDF
+            round_history = [h for h in session_history if h.get("round") == round_num]
+            if round_history:  # only add if there's actual content
+                all_rounds.append({
+                    "round":   round_num,
+                    "topic":   topic,
+                    "title":   round_title,
+                    "history": round_history,
+                })
 
-        print(f"\n  {'='*56}")
-        print(f"  ROUND {round_num} COMPLETE")
-        print(f"  {'='*56}")
-        print(f"\n  Type your next topic to continue, or 'quit' / 'stop' to save and exit.")
-        print(f"  > ", end="", flush=True)
-
-        next_input = input().strip()
-
-        if next_input.lower() in ("quit", "stop", "exit", "q", "done"):
-            break
-
-        if not next_input:
-            print("  No topic entered. Type 'quit' to exit or enter a topic to continue.")
+            print(f"\n  {'='*56}")
+            print(f"  ROUND {round_num} COMPLETE")
+            print(f"  {'='*56}")
+            print(f"\n  Type your next topic to continue, or 'quit' / 'stop' to save and exit.")
             print(f"  > ", end="", flush=True)
+
             next_input = input().strip()
-            if not next_input or next_input.lower() in ("quit", "stop", "exit", "q", "done"):
+
+            if next_input.lower() in ("quit", "stop", "exit", "q", "done"):
                 break
 
-        topic     = next_input
-        round_num += 1
+            if not next_input:
+                print("  No topic entered. Type 'quit' to exit or enter a topic to continue.")
+                print(f"  > ", end="", flush=True)
+                next_input = input().strip()
+                if not next_input or next_input.lower() in ("quit", "stop", "exit", "q", "done"):
+                    break
 
-    # ── Save full session PDF ──
-    save_pdf(all_rounds, agents, company, turns)
+            topic     = next_input
+            round_num += 1
 
-    print(f"\n  {'='*56}")
-    print(f"  SESSION COMPLETE — {round_num} round(s) saved")
-    print(f"  {'='*56}\n")
+    except KeyboardInterrupt:
+        print("\n\n  Session interrupted — saving PDF...")
+    finally:
+        if all_rounds:
+            save_pdf(all_rounds, agents, company, turns)
+            print(f"\n  {'='*56}")
+            print(f"  SESSION SAVED — {len(all_rounds)} round(s)")
+            print(f"  {'='*56}\n")
+        else:
+            print("\n  No rounds completed — nothing to save.")
 
 
 if __name__ == "__main__":
