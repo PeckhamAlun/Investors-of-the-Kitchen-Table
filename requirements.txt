@@ -1,0 +1,31 @@
+# Kitchen Table - Python dependencies (Python 3.11, Windows)
+# Built from an import scan of the codebase.
+
+# --- Core: needed to run a debate (main.py, query.py, config.py) ---
+anthropic
+chromadb
+sentence-transformers
+langgraph
+langchain-core
+langchain-text-splitters
+reportlab
+prompt_toolkit
+numpy
+
+# --- Ingestion: companies + philosophy (scripts/) ---
+pdfplumber
+pypdf                 # scripts/split_memo_collection.py
+requests
+python-dateutil
+pymongo               # analyse_company.py stores company_financials in MongoDB
+yfinance              # analyse_company.py pulls financials
+
+# --- YouTube ingest (ingest_youtube.py, pull_transcripts.py, youtube_processor.py) ---
+yt-dlp
+youtube-transcript-api
+openai-whisper        # also pulls in torch (large download); needs ffmpeg on PATH
+python-dotenv         # youtube_processor.py uses load_dotenv
+
+# --- DB visualiser (scripts/visualise_db.py) ---
+umap-learn
+plotly
