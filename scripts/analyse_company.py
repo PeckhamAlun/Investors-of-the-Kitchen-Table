@@ -595,6 +595,147 @@ def build_computed_chunk(name, ticker, data):
 
 
 # ==============================================================================
+# STEP 3b — PRE-COMPUTED TREND ANALYSIS
+# ==============================================================================
+
+def compute_trend_analysis(name, ticker, data):
+    """
+    Build one dedicated trend-analysis chunk from the parsed quarterly data:
+    per-quarter YoY revenue growth, gross margin, FCF margin and SBC % of
+    revenue, plus trend direction (last 2 quarters vs the prior 2) and
+    inflection points (the quarter where the QoQ direction flipped).
+
+    Any metric with fewer than 3 quarters of data is labelled INSUFFICIENT
+    DATA and its trend/inflection detection is skipped. Best-effort: never
+    raises — returns None if nothing useful can be computed.
+    """
+    try:
+        inc = data["income_q"]
+        cf  = data["cashflow_q"]
+        inc_cols = sorted_cols(inc)
+        cf_cols  = sorted_cols(cf)
+        if not inc_cols:
+            return None
+
+        fye_month = detect_fye_month(data)
+
+        # ---- parse each quarter, sorted chronologically (oldest -> newest) ----
+        quarters = []
+        for col in sorted(inc_cols):
+            period = col_date(col)
+            fy, q = fiscal_year_quarter(period, fye_month)
+            rev = cell(inc, ["Total Revenue", "Revenue", "Operating Revenue"], col)
+            gp  = cell(inc, ["Gross Profit"], col)
+            sbc = cell(cf, ["Stock Based Compensation"], col) if col in cf_cols else None
+            fcf = cell(cf, ["Free Cash Flow"], col) if col in cf_cols else None
+            yoy = None
+            pcol = prior_year_col(inc_cols, col)   # same quarter, prior year
+            if rev and pcol is not None:
+                prev = cell(inc, ["Total Revenue", "Revenue", "Operating Revenue"], pcol)
+                if prev:
+                    yoy = (rev - prev) / prev * 100
+            quarters.append({
+                "label":      f"Q{q} FY{fy}",
+                "rev_yoy":    yoy,
+                "gm":         (gp / rev * 100) if (gp is not None and rev) else None,
+                "fcf_margin": (fcf / rev * 100) if (fcf is not None and rev) else None,
+                "sbc_pct":    (sbc / rev * 100) if (sbc is not None and rev) else None,
+            })
+
+        def metric_block(title, noun, key, fmt):
+            """One formatted section: per-quarter series, direction, inflection."""
+            pts = [(qq["label"], qq[key]) for qq in quarters if qq[key] is not None]
+            if len(pts) < 3:
+                return (f"{title}:\n"
+                        f"  INSUFFICIENT DATA ({len(pts)} quarter(s) available — need at least 3).\n")
+            vals = [v for _, v in pts]
+            series = " → ".join(f"{lab}: {fmt(v)}" for lab, v in pts)
+
+            # Direction: average of the last 2 quarters vs the prior 2
+            # (the prior group shrinks to 1 quarter when only 3 exist).
+            recent = sum(vals[-2:]) / 2
+            prior_grp = vals[-4:-2] if len(vals) >= 4 else vals[:-2]
+            delta = recent - sum(prior_grp) / len(prior_grp)
+            if abs(delta) <= 1.0:
+                direction = f"STABLE (within 1%; range: {fmt(min(vals))} to {fmt(max(vals))})"
+            elif delta > 0:
+                direction = f"ACCELERATING ({delta:+.1f}pp, last 2 quarters vs prior 2)"
+            else:
+                direction = f"DECELERATING ({delta:+.1f}pp, last 2 quarters vs prior 2)"
+
+            # Inflection: the most recent quarter where the QoQ direction
+            # flipped sign (e.g. quarters of deceleration, then acceleration).
+            deltas = [vals[i + 1] - vals[i] for i in range(len(vals) - 1)]
+            dirs = [1 if d > 0 else (-1 if d < 0 else 0) for d in deltas]
+            flip = None
+            for i in range(1, len(dirs)):
+                if dirs[i] != 0 and dirs[i - 1] != 0 and dirs[i] != dirs[i - 1]:
+                    flip = i
+            if flip is not None:
+                run = 0
+                j = flip - 1
+                while j >= 0 and dirs[j] == dirs[flip - 1]:
+                    run += 1
+                    j -= 1
+                turned = "turned upward" if dirs[flip] > 0 else "turned downward"
+                prior_word = "decline" if dirs[flip - 1] < 0 else "increase"
+                infl = (f"{noun} {turned} in {pts[flip + 1][0]} after "
+                        f"{run} consecutive quarter(s) of {prior_word}.")
+            else:
+                infl = "None detected."
+
+            return (f"{title}:\n"
+                    f"  {series}\n"
+                    f"  Direction: {direction}\n"
+                    f"  Inflection: {infl}\n")
+
+        # ---- analyst consensus trend (best-effort; format varies by yf ver) ----
+        consensus = "ANALYST CONSENSUS TREND:\n  Not available.\n"
+        try:
+            rec = data.get("recommendations")
+            if rec is not None and not getattr(rec, "empty", True) \
+                    and "period" in getattr(rec, "columns", []):
+                rows = {str(r.get("period")): r for _, r in rec.iterrows()}
+
+                def counts(r):
+                    return (f"{int(fnum(r.get('strongBuy')) or 0)} strong buy / "
+                            f"{int(fnum(r.get('buy')) or 0)} buy / "
+                            f"{int(fnum(r.get('hold')) or 0)} hold / "
+                            f"{int(fnum(r.get('sell')) or 0)} sell / "
+                            f"{int(fnum(r.get('strongSell')) or 0)} strong sell")
+
+                if "0m" in rows and "-3m" in rows:
+                    consensus = ("ANALYST CONSENSUS TREND:\n"
+                                 f"  3 months ago: {counts(rows['-3m'])}\n"
+                                 f"  Now:          {counts(rows['0m'])}\n")
+        except Exception:
+            pass  # keep the 'Not available.' default
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        text = (
+            f"{name} ({ticker}) — Pre-Computed Trend Analysis\n"
+            f"Generated: {today} | Source: computed from ingested financial data\n\n"
+            + metric_block("REVENUE GROWTH TREND (YoY)", "Revenue growth", "rev_yoy",
+                           lambda v: f"{v:+.0f}%") + "\n"
+            + metric_block("GROSS MARGIN TREND", "Gross margin", "gm",
+                           lambda v: f"{v:.1f}%") + "\n"
+            + metric_block("FCF MARGIN TREND", "FCF margin", "fcf_margin",
+                           lambda v: f"{v:.0f}%") + "\n"
+            + metric_block("SBC AS % OF REVENUE", "SBC % of revenue", "sbc_pct",
+                           lambda v: f"{v:.0f}%") + "\n"
+            + consensus
+        ).rstrip()
+
+        most_recent = col_date(inc_cols[0])
+        return {"text": text, "source": f"{name} Trend Analysis",
+                "source_type": "trend_analysis", "period": most_recent,
+                "form_type": "trend_analysis"}
+    except Exception as e:
+        print(f"   ⚠️  Warning: trend analysis failed ({e}) — continuing without it.")
+        return None
+
+
+# ==============================================================================
 # STEP 4 — SEC EDGAR PULL  (unchanged)
 # ==============================================================================
 
@@ -1025,6 +1166,10 @@ def main():
     computed = build_computed_chunk(display, ticker, data)
     computed_chunks = [computed] if computed else []
 
+    # STEP 3b — pre-computed trend analysis (directions + inflection points)
+    trend = compute_trend_analysis(display, ticker, data)
+    trend_chunks = [trend] if trend else []
+
     # STEP 4 — SEC (best-effort, never blocks)
     try:
         sec_chunks = pull_sec(display, ticker)
@@ -1032,7 +1177,7 @@ def main():
         print(f"   ⚠️  Warning: SEC pull failed entirely ({e}) — continuing with yfinance data.")
         sec_chunks = []
 
-    all_chunks = market_chunks + computed_chunks + sec_chunks
+    all_chunks = market_chunks + computed_chunks + trend_chunks + sec_chunks
 
     # STEP 5 — ingest
     added, total = ingest(all_chunks, company_key, ticker, exchange, args.append)
@@ -1046,9 +1191,11 @@ def main():
     print(f"\n{bar}")
     print(f"✅ INGEST COMPLETE — {display} ({ticker}) {exchange}")
     print(bar)
+    trend_count = sum(1 for c in all_chunks if c.get("source_type") == "trend_analysis")
     print(f"   yfinance financials : {count('yfinance_financials'):>3} chunks")
     print(f"   yfinance metrics    : {count('yfinance_metrics'):>3} chunks")
     print(f"   Computed metrics    : {count('computed_metrics'):>3} chunks")
+    print(f"   Trend analysis      : {trend_count:>3} chunk{'s' if trend_count != 1 else ''}")
     print(f"   SEC filings         : {count('sec_filing'):>3} chunks")
     print("   ──────────────────────────────")
     print(f"   Total added         : {added:>3} chunks")

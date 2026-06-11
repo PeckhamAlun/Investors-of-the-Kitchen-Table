@@ -82,6 +82,27 @@ def normalize_company(name):
 EMBED_MODEL = "all-MiniLM-L6-v2"
 
 # ==============================================================================
+# MONGODB ATLAS SETTINGS
+# ==============================================================================
+MONGODB_URI        = os.getenv("MONGODB_URI")
+MONGODB_DB_NAME    = "kitchen_table"
+
+# ==============================================================================
+# GEMINI EMBEDDING SETTINGS
+# ==============================================================================
+GEMINI_EMBED_MODEL  = "gemini-embedding-001"
+GEMINI_EMBED_DIMS   = 3072
+GOOGLE_API_KEY      = os.getenv("GOOGLE_API_KEY")
+
+# ==============================================================================
+# MONGODB COLLECTION NAMING — mirrors ChromaDB convention exactly
+# ==============================================================================
+def mongo_philosophy_collection(agent_name: str) -> str:
+    return f"{agent_name.lower().replace(' ', '_')}_philosophy"
+
+MONGO_COMPANY_COLLECTION = "company_financials"
+
+# ==============================================================================
 # CHUNKING SETTINGS
 # ==============================================================================
 

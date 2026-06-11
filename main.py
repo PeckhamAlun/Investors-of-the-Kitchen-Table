@@ -48,7 +48,7 @@ from config import (
 # ==============================================================================
 
 DEFAULT_AGENTS      = ["buffett", "cathie_wood"]
-DEFAULT_TURNS       = 5
+DEFAULT_TURNS       = 2
 MAX_CONTEXT_CHARS   = 8000
 DEBATE_MAX_TOKENS   = 1200
 
@@ -468,7 +468,6 @@ def agent_node(state: DebateState) -> DebateState:
 
     system_prompt     = load_system_prompt(agent)
     context           = retrieve_context(topic, agent, company, intent=intent, audit=state.get("audit", False))
-    focus_instruction = build_focus_instruction(intent, company)
 
     # Full session history — agents see everything from all rounds
     history_text = ""
@@ -488,24 +487,82 @@ def agent_node(state: DebateState) -> DebateState:
         Relevant context from your research and knowledge base:
         {context if context else '[No specific context retrieved — draw on your frameworks]'}
 
-        {focus_instruction}
+        YOUR CONTEXT:
+        You are presenting as yourself — your own frameworks, your own voice,
+        your own convictions — in a structured investment debate with other
+        serious investors. Treat this as a high-stakes internal research
+        meeting where a portfolio manager is deciding whether this company
+        warrants serious capital allocation.
 
-        YOUR ROLE: 
-        You are a top-tier investment analyst working at a prestigious hedge fund, presenting to your Portfolio Manager 
-        State your investment conviction on this topic in a single sentence. Then support it with 3-5 bullet points — each one a specific, standalone observation. 
-        These can be metrics, product facts, competitive dynamics, or management calls. 
-        Be specific enough that an investor could verify them or act on them. 
-        If you agree with a point already made by the other investors, do not restate it — deepen it or advance to the next unresolved question. 
-        End with a "Go verify" line that lists the exact questions this raises that need to be checked against the filings or the product.
+        Your job is not to be balanced. Your job is to give the sharpest,
+        most evidenced version of your actual view. If you are bullish, make
+        the bull case with precision. If you are skeptical, name exactly what
+        would have to be true for you to be wrong.
 
-        At the end of the day, the goal is to be able to initiate coverage of a stock as quick as possible based on the arguments that are put forth. 
-        The portfolio manager will take your arguments, verify the key points, and then decide whether to continue coverage of the stock based on the strength of the case and the unresolved questions.
+        Every claim must be grounded in either retrieved financial data or
+        your own retrieved investment philosophy — not general knowledge,
+        not industry averages, not what you think sounds right. If you do
+        not have the data to support a claim, put it in the Go verify section
+        instead of stating it as fact.
+
+        The portfolio manager reading this will verify your key points against
+        the filings before making any decision. Your value is in the quality
+        of the argument and the precision of what you flag as unresolved —
+        not in covering every possible angle.
+
+        CRITICAL: Read the full debate history before writing. Any point already made by another investor — even if you would frame it differently — must NOT be repeated. Skip it entirely and move to the next unaddressed angle. You will be penalised for restating what has already been said.
+
+        TEMPORAL REASONING — how to use financial data across time:
+
+        All quarters in the financial data are available to you and all of
+        them matter — they form the complete picture of how this business
+        has evolved. Do not ignore older data.
+
+        Apply this hierarchy when drawing conclusions:
+
+        1. TREND FIRST — before citing any individual quarter, establish the
+           direction of the business. Is revenue growth accelerating or
+           decelerating? Are margins expanding or compressing? Is FCF improving
+           as a percentage of revenue? The trend is more important than any
+           single data point.
+
+        2. TRAILING FOUR QUARTERS — this is your primary evidence base for
+           the current state of the business. Weight these most heavily when
+           making claims about where the company stands today.
+
+        3. INFLECTION QUARTERS — some older quarters matter more than others
+           because they represent a turning point. If a key metric changed
+           direction in a specific quarter — NRR dropped, margins expanded
+           suddenly, revenue growth reaccelerated — that quarter deserves
+           explicit mention as the inflection point, not just as historical data.
+           Example: "Gross margins compressed from 74% to 71% in Q2 2023 and
+           have not recovered — that compression predates the AI infrastructure
+           thesis and raises questions about structural pricing power."
+
+        4. OLDER DATA AS CONTEXT — quarters beyond the trailing twelve months
+           should be used to establish the baseline the business grew from, or
+           to identify whether a current trend is a reversion to historical
+           norms or genuinely new behaviour. Never cite an old quarter as
+           equivalent evidence to a recent one without explaining why it is
+           specifically meaningful.
+
+        If pre-computed trend summaries are available in your retrieved context
+        (labelled as TREND ANALYSIS or INFLECTION FLAGS), treat those as
+        authoritative — they were computed directly from the raw financial data.
+
+        If the data does not contain a clear inflection point, say so explicitly
+        rather than treating all quarters as equally weighted.
 
         FORMAT RULES — follow exactly:
         1. One conviction sentence — your position, stated plainly
-        2. Bullet points — maximum 20 words each. One observation per bullet. No sub-clauses, no qualifications, no "but". If it needs more than 20 words it is two bullets, not one long one.
+        2. Bullet points — MAXIMUM 5 bullets per turn. Pick your 3-5 sharpest, most specific observations only. If you have more than 5 points, save them for your next turn. Each bullet maximum 20 words. One observation per bullet. No sub-clauses.
         3. If one bullet point is insufficient to cover the point being made, have another bullet point that continues the thought, rather than trying to cram it all into one bullet with conjunctions. This forces clarity and precision in each point.
-        4. One "Go verify" line — the exact questions this raises that need to be checked against the filings or the product
+        4. "Go verify" section — list each verification question on its own line,
+           prefixed with "- ". Maximum 3 questions. Each must be specific and
+           answerable from filings or product data. Format exactly like this:
+           Go verify:
+           - What is SBC as % of revenue for the trailing four quarters?
+           - What is net revenue retention rate — has it crossed below 115%?
 
         If you agree with a point already made, do not restate it. Deepen it or advance to the next unresolved question, tackle more vital information to move forward.
 
@@ -520,14 +577,61 @@ def agent_node(state: DebateState) -> DebateState:
         Relevant context from your research:
         {context if context else '[No specific context retrieved — draw on your frameworks]'}
 
-        {focus_instruction}
-
         Respond to the arguments made so far by {other_names}. You may challenge a specific point, build on an argument, introduce a new angle, or connect this topic to what was already established in earlier rounds.
+
+        CRITICAL: Read the full debate history before writing. Any point already made by another investor — even if you would frame it differently — must NOT be repeated. Skip it entirely and move to the next unaddressed angle. You will be penalised for restating what has already been said.
+
+        TEMPORAL REASONING — how to use financial data across time:
+
+        All quarters in the financial data are available to you and all of
+        them matter — they form the complete picture of how this business
+        has evolved. Do not ignore older data.
+
+        Apply this hierarchy when drawing conclusions:
+
+        1. TREND FIRST — before citing any individual quarter, establish the
+           direction of the business. Is revenue growth accelerating or
+           decelerating? Are margins expanding or compressing? Is FCF improving
+           as a percentage of revenue? The trend is more important than any
+           single data point.
+
+        2. TRAILING FOUR QUARTERS — this is your primary evidence base for
+           the current state of the business. Weight these most heavily when
+           making claims about where the company stands today.
+
+        3. INFLECTION QUARTERS — some older quarters matter more than others
+           because they represent a turning point. If a key metric changed
+           direction in a specific quarter — NRR dropped, margins expanded
+           suddenly, revenue growth reaccelerated — that quarter deserves
+           explicit mention as the inflection point, not just as historical data.
+           Example: "Gross margins compressed from 74% to 71% in Q2 2023 and
+           have not recovered — that compression predates the AI infrastructure
+           thesis and raises questions about structural pricing power."
+
+        4. OLDER DATA AS CONTEXT — quarters beyond the trailing twelve months
+           should be used to establish the baseline the business grew from, or
+           to identify whether a current trend is a reversion to historical
+           norms or genuinely new behaviour. Never cite an old quarter as
+           equivalent evidence to a recent one without explaining why it is
+           specifically meaningful.
+
+        If pre-computed trend summaries are available in your retrieved context
+        (labelled as TREND ANALYSIS or INFLECTION FLAGS), treat those as
+        authoritative — they were computed directly from the raw financial data.
+
+        If the data does not contain a clear inflection point, say so explicitly
+        rather than treating all quarters as equally weighted.
 
         FORMAT RULES — follow exactly:
         1. One conviction sentence — your position, stated plainly
-        2. Bullet points — each one a specific, standalone observation. Can be a metric, a product fact, a competitive dynamic, or a management call. Must be specific enough to verify or act on.
-        3. One "Go verify" line — the exact questions this raises that need to be checked against the filings or the product
+        2. Bullet points — MAXIMUM 5 bullets per turn. Pick your 3-5 sharpest, most specific observations only. If you have more than 5 points, save them for your next turn. Each bullet maximum 20 words. One observation per bullet. No sub-clauses.
+        3. If one bullet point is insufficient to cover the point being made, have another bullet point that continues the thought, rather than trying to cram it all into one bullet with conjunctions. This forces clarity and precision in each point.
+        4. "Go verify" section — list each verification question on its own line,
+           prefixed with "- ". Maximum 3 questions. Each must be specific and
+           answerable from filings or product data. Format exactly like this:
+           Go verify:
+           - What is SBC as % of revenue for the trailing four quarters?
+           - What is net revenue retention rate — has it crossed below 115%?
 
         If you agree with a point already made, do not restate it. Deepen it or advance to the next unresolved question.
 
@@ -668,6 +772,236 @@ def build_debate_graph():
 # PDF GENERATION
 # ==============================================================================
 
+_MONEY_RE = re.compile(r"^(-?)\$([\d.,]+)([KMB])?$")
+
+
+def _money_to_float(s: str | None) -> float | None:
+    """'$549.0M' -> 549000000.0. Returns None for N/A / unparseable values."""
+    if not s:
+        return None
+    m = _MONEY_RE.match(s.strip())
+    if not m:
+        return None
+    try:
+        value = float(m.group(2).replace(",", ""))
+    except ValueError:
+        return None
+    mult = {"K": 1e3, "M": 1e6, "B": 1e9}.get(m.group(3), 1.0)
+    return -value * mult if m.group(1) else value * mult
+
+
+def _grab(pattern: str, text: str) -> str | None:
+    """First regex group from text (multiline), or None."""
+    m = re.search(pattern, text, re.MULTILINE)
+    return m.group(1).strip() if m else None
+
+
+def _ratio_str(v: str | None) -> str:
+    """'11.53' -> '11.5x'. Non-numeric values pass through; None -> 'N/A'."""
+    try:
+        return f"{float(v):.1f}x"
+    except (TypeError, ValueError):
+        return v or "N/A"
+
+
+def _parse_consensus(text: str) -> str | None:
+    """Best-effort parse of the yfinance analyst recommendations table into
+    'X buy / X hold / X sell'. Returns None if the format doesn't match."""
+    try:
+        lines = [l for l in text.split("\n") if l.strip()]
+        cols, header_idx = None, None
+        for i, line in enumerate(lines):
+            low = line.lower()
+            if "buy" in low and "hold" in low and "sell" in low:
+                cols, header_idx = line.split(), i
+                break
+        if cols is None:
+            return None
+        for line in lines[header_idx + 1:]:
+            parts = line.split()
+            if len(parts) < len(cols):
+                continue
+            vals = dict(zip(cols, parts[-len(cols):]))
+
+            def count(*keys):
+                total, found = 0, False
+                for col_name, raw in vals.items():
+                    if col_name.lower() in keys:
+                        try:
+                            total += int(float(raw))
+                            found = True
+                        except ValueError:
+                            pass
+                return total if found else None
+
+            buys  = count("strongbuy", "buy")
+            holds = count("hold")
+            sells = count("sell", "strongsell")
+            if buys is None and holds is None and sells is None:
+                continue
+
+            def show(n):
+                return "N/A" if n is None else str(n)
+
+            return f"{show(buys)} buy / {show(holds)} hold / {show(sells)} sell"
+    except Exception:
+        pass
+    return None
+
+
+def _financial_snapshot_data(company: str | None) -> dict | None:
+    """Parse the company's ingested chunks (analyse_company.py output) into the
+    Financial Snapshot page fields. Returns None when nothing usable exists —
+    the PDF simply skips the page rather than crashing."""
+    if not company:
+        return None
+    col = load_collection(COMPANY_COLLECTION)
+    if col is None:
+        return None
+    try:
+        res = col.get(where={"company": company}, include=["documents", "metadatas"])
+    except Exception:
+        return None
+
+    rows = [
+        (m or {}, d or "")
+        for m, d in zip(res.get("metadatas") or [], res.get("documents") or [])
+        if (m or {}).get("source_type") in ("computed_metrics", "yfinance_financials", "yfinance_metrics")
+    ]
+    if not rows:
+        return None
+
+    ticker = next((m.get("ticker") for m, _ in rows if m.get("ticker")), None)
+
+    def quarterly(form_type: str) -> list[tuple[dict, str]]:
+        matches = [
+            (m, d) for m, d in rows
+            if m.get("form_type") == form_type and "Annual" not in (m.get("source") or "")
+        ]
+        return sorted(matches, key=lambda md: md[0].get("period", ""), reverse=True)
+
+    cashflow_by_period = {m.get("period"): d for m, d in quarterly("cash_flow")}
+
+    quarters = []
+    for m, d in quarterly("income_statement")[:4]:
+        period = m.get("period", "")
+        cf     = cashflow_by_period.get(period, "")
+
+        rev_str = _grab(r"^Revenue: (\S+)", d)
+        op_str  = _grab(r"^Operating Income: (\S+)", d)
+        rev_f, op_f = _money_to_float(rev_str), _money_to_float(op_str)
+        op_margin = f"{op_f / rev_f * 100:.1f}%" if (rev_f and op_f is not None) else None
+
+        quarters.append({
+            "label":        _grab(r"Income Statement (Q\d+ FY\d+)", d) or period or "N/A",
+            "revenue":      rev_str or "N/A",
+            "yoy":          _grab(r"^Revenue: \S+ \(([+\-][\d.]+%) YoY\)", d),
+            "gross_margin": _grab(r"Gross Margin: ([\d.]+%)", d) or "N/A",
+            "op_margin":    op_margin or "N/A",
+            "sbc":          _grab(r"^Stock-Based Compensation: (\S+)", d) or "N/A",
+            "sbc_pct":      _grab(r"^Stock-Based Compensation: \S+ \(([\d.]+%) of revenue\)", d),
+            "fcf":          _grab(r"^Free Cash Flow: (\S+)", cf) or "N/A",
+            "fcf_margin":   _grab(r"FCF Margin: (-?[\d.]+%)", cf) or "N/A",
+        })
+
+    key_metrics = next((d for m, d in rows if m.get("form_type") == "key_metrics"), "")
+    market = {
+        "market_cap": _grab(r"^Market Cap: (\S+)", key_metrics) or "N/A",
+        "ev_revenue": _ratio_str(_grab(r"^EV/Revenue: (\S+)", key_metrics)),
+        "forward_pe": _ratio_str(_grab(r"^Forward P/E: (\S+)", key_metrics)),
+    }
+
+    rec_text  = next((d for m, d in rows if m.get("form_type") == "analyst_recommendations"), "")
+    consensus = _parse_consensus(rec_text) if rec_text else None
+
+    # Pre-computed trend labels, if the computed_metrics chunk carries them
+    computed = next((d for m, d in rows if m.get("source_type") == "computed_metrics"), "")
+    flags = []
+    lines = computed.split("\n")
+    i = 0
+    while i < len(lines):
+        upper = lines[i].upper()
+        if "TREND ANALYSIS" in upper or "INFLECTION FLAG" in upper:
+            i += 1
+            while i < len(lines) and lines[i].strip():
+                flags.append(lines[i].strip())
+                i += 1
+        else:
+            i += 1
+
+    if not quarters and not key_metrics and not rec_text and not computed:
+        return None
+
+    return {
+        "ticker":    ticker,
+        "quarters":  quarters,
+        "market":    market,
+        "consensus": consensus,
+        "flags":     flags,
+    }
+
+
+_GV_STOPWORDS = {"what", "is", "the", "and", "of"}
+
+_GV_CATEGORIES = [
+    ("VALUATION & RETURNS",   ["valuation", "multiple", "p/e", "fcf", "owner earnings", "yield", "price", "return"]),
+    ("COMPETITIVE POSITION",  ["moat", "hyperscaler", "competitor", "churn", "retention", "nrr", "market share", "bundling"]),
+    ("FINANCIAL QUALITY",     ["margin", "sbc", "revenue", "gross", "operating", "cash flow", "dilution", "expense"]),
+    ("MANAGEMENT & STRATEGY", ["management", "ceo", "capital allocation", "guidance", "strategy", "product"]),
+]
+
+
+def _gv_keywords(question: str) -> set[str]:
+    """Significant keywords for dedup — every word bar the stopword list."""
+    return set(re.findall(r"[a-z0-9][a-z0-9/\-]*", question.lower())) - _GV_STOPWORDS
+
+
+def _collect_go_verify(all_rounds: list[dict]) -> dict[str, list[str]]:
+    """Extract every 'Go verify' question across all rounds, dedupe by shared
+    keywords, and group into research categories for the checklist page."""
+    questions: list[str] = []
+    for rnd in all_rounds:
+        for h in rnd["history"]:
+            if h["agent"] == "synthesis":
+                continue
+            for line in h["response"].split("\n"):
+                idx = line.lower().find("go verify")
+                if idx == -1:
+                    continue
+                rest = re.sub(r"^[\s:\*–—\-]+", "", line[idx + len("go verify"):]).strip()
+                if not rest:
+                    continue
+                if "?" in rest:
+                    for part in rest.split("?"):
+                        part = part.strip(" ;,*-—–")
+                        if len(part) > 3:
+                            questions.append(f"{part}?")
+                else:
+                    questions.append(rest)
+
+    # Dedupe: drop any question sharing >= 3 significant keywords with an earlier one
+    kept: list[str] = []
+    kept_keywords: list[set[str]] = []
+    for q in questions:
+        kw = _gv_keywords(q)
+        if any(len(kw & previous) >= 3 for previous in kept_keywords):
+            continue
+        kept.append(q)
+        kept_keywords.append(kw)
+
+    grouped: dict[str, list[str]] = {name: [] for name, _ in _GV_CATEGORIES}
+    grouped["OTHER"] = []
+    for q in kept:
+        q_low = q.lower()
+        for name, keywords in _GV_CATEGORIES:
+            if any(k in q_low for k in keywords):
+                grouped[name].append(q)
+                break
+        else:
+            grouped["OTHER"].append(q)
+    return grouped
+
+
 def save_pdf(
     all_rounds: list[dict],   # [{round, topic, title, history}]
     agents: list[str],
@@ -680,7 +1014,8 @@ def save_pdf(
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.lib.units import mm
         from reportlab.platypus import (
-            SimpleDocTemplate, Paragraph, Spacer, HRFlowable, PageBreak
+            SimpleDocTemplate, Paragraph, Spacer, HRFlowable, PageBreak,
+            Table, TableStyle
         )
         from reportlab.lib.enums import TA_JUSTIFY, TA_LEFT
     except ImportError:
@@ -720,6 +1055,11 @@ def save_pdf(
     s_go_verify  = ms("GoVerify",   "Normal", fontSize=9,  leading=13,
                     textColor=colors.HexColor("#444444"),
                     fontName="Helvetica-Oblique", spaceAfter=8)
+    s_snap_row   = ms("SnapRow",    "Normal", fontSize=10, leading=15, spaceAfter=2)
+
+    def esc(t) -> str:
+        return str(t).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
     def agent_label_para(agent: str) -> Paragraph:
         r, g, b = AGENT_COLOURS.get(agent, (0.2, 0.2, 0.2))
         hex_col = "#{:02x}{:02x}{:02x}".format(int(r*255), int(g*255), int(b*255))
@@ -731,7 +1071,8 @@ def save_pdf(
             line = line.strip()
             if not line or line == '---':
                 continue
-            if line.startswith('**Conviction') or line.startswith('**conviction'):
+            conviction_markers = ('conviction:', '**conviction', 'conviction —', 'conviction —')
+            if any(line.lower().startswith(m) for m in conviction_markers):
                 clean = line.replace('**', '')
                 elements.append(Paragraph(clean, s_conviction))
             elif line.startswith('- ') or line.startswith('* '):
@@ -760,6 +1101,71 @@ def save_pdf(
     story.append(Paragraph(f"<b>Participants:</b> {' vs '.join(display_name(a) for a in agents)}", s_meta))
     story.append(Paragraph(f"<b>Date:</b> {datetime.now().strftime('%d %B %Y, %H:%M')}  |  <b>Rounds:</b> {len(all_rounds)}  |  <b>Turns per agent:</b> {turns}", s_meta))
     story.append(Spacer(1, 10*mm))
+
+    # ── Financial Snapshot (parsed from the ingested company chunks) ──
+    snapshot = _financial_snapshot_data(company)
+    if snapshot:
+        story.append(PageBreak())
+        ticker_tag = f" ({esc(snapshot['ticker'])})" if snapshot["ticker"] else ""
+        story.append(HRFlowable(width="100%", thickness=2, color=colors.HexColor("#1a1a2e"), spaceAfter=6))
+        story.append(Paragraph(f"FINANCIAL SNAPSHOT — {esc(company)}{ticker_tag}", s_round_title))
+        story.append(Paragraph("Data sourced from ingested financial filings", s_round_sub))
+        story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#dddddd"), spaceAfter=8))
+
+        latest  = snapshot["quarters"][0] if snapshot["quarters"] else {}
+        yoy_tag = f"   ({esc(latest['yoy'])} YoY)" if latest.get("yoy") else ""
+        fcf_tag = f"   ({esc(latest['fcf_margin'])} margin)" if latest.get("fcf_margin") not in (None, "N/A") else ""
+        sbc_tag = f"   ({esc(latest['sbc_pct'])} of revenue)" if latest.get("sbc_pct") else ""
+
+        story.append(Paragraph("LATEST QUARTER", s_turn_header))
+        for label, value in [
+            ("Revenue",          f"{esc(latest.get('revenue', 'N/A'))}{yoy_tag}"),
+            ("Gross Margin",     esc(latest.get("gross_margin", "N/A"))),
+            ("Operating Margin", esc(latest.get("op_margin", "N/A"))),
+            ("FCF",              f"{esc(latest.get('fcf', 'N/A'))}{fcf_tag}"),
+            ("SBC",              f"{esc(latest.get('sbc', 'N/A'))}{sbc_tag}"),
+        ]:
+            story.append(Paragraph(f"<b>{label}:</b> {value}", s_snap_row))
+
+        story.append(Paragraph("MARKET DATA", s_turn_header))
+        for label, value in [
+            ("Market Cap",        snapshot["market"]["market_cap"]),
+            ("EV/Revenue",        snapshot["market"]["ev_revenue"]),
+            ("Forward P/E",       snapshot["market"]["forward_pe"]),
+            ("Analyst Consensus", snapshot["consensus"] or "N/A"),
+        ]:
+            story.append(Paragraph(f"<b>{label}:</b> {esc(value)}", s_snap_row))
+
+        story.append(Paragraph("QUARTERLY TREND", s_turn_header))
+        if snapshot["quarters"]:
+            trend_data = [["Period", "Revenue", "Gr. Margin", "FCF Margin"]]
+            for q in snapshot["quarters"]:
+                trend_data.append([q["label"], q["revenue"], q["gross_margin"], q["fcf_margin"]])
+            trend = Table(trend_data, colWidths=[34*mm, 34*mm, 34*mm, 34*mm], hAlign="LEFT")
+            trend.setStyle(TableStyle([
+                ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
+                ("FONTNAME",      (0, 1), (-1, -1), "Helvetica"),
+                ("FONTSIZE",      (0, 0), (-1, -1), 9),
+                ("TEXTCOLOR",     (0, 0), (-1, -1), colors.HexColor("#1a1a2e")),
+                ("LINEBELOW",     (0, 0), (-1, 0),  0.5, colors.HexColor("#aaaaaa")),
+                ("TOPPADDING",    (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ("LEFTPADDING",   (0, 0), (-1, -1), 0),
+            ]))
+            story.append(trend)
+        else:
+            story.append(Paragraph("N/A — no quarterly data available", s_snap_row))
+
+        story.append(Paragraph("TREND FLAGS", s_turn_header))
+        if snapshot["flags"]:
+            for flag in snapshot["flags"]:
+                story.append(Paragraph(f"• {esc(flag)}", s_bullet))
+        else:
+            story.append(Paragraph("N/A — no pre-computed trend flags in the ingested data", s_snap_row))
+
+        story.append(Spacer(1, 4*mm))
+        story.append(HRFlowable(width="100%", thickness=2, color=colors.HexColor("#1a1a2e")))
+        story.append(PageBreak())
 
     # ── Rounds ──
     from collections import defaultdict
@@ -810,6 +1216,25 @@ def save_pdf(
                         story.append(Paragraph(f"<b>{para}</b>", s_synth_body))
                     else:
                         story.append(Paragraph(para, s_synth_body))
+
+    # ── Go Verify research checklist (aggregated across all rounds) ──
+    go_verify = _collect_go_verify(all_rounds)
+    gv_total  = sum(len(items) for items in go_verify.values())
+    if gv_total:
+        story.append(PageBreak())
+        story.append(HRFlowable(width="100%", thickness=2, color=colors.HexColor("#1a1a2e"), spaceAfter=6))
+        story.append(Paragraph("GO VERIFY — RESEARCH CHECKLIST", s_round_title))
+        story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#dddddd"), spaceAfter=8))
+        for category, items in go_verify.items():
+            if not items:
+                continue
+            story.append(Paragraph(category, s_turn_header))
+            for q in items:
+                story.append(Paragraph(f'<font name="ZapfDingbats">o</font> {esc(q)}', s_bullet))
+        story.append(Spacer(1, 4*mm))
+        story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#2c3e50"), spaceAfter=4))
+        story.append(Paragraph(f"<b>Total items:</b> {gv_total}", s_meta))
+        story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#2c3e50"), spaceBefore=2))
 
     doc.build(story)
     print(f"\n  PDF saved: outputs/{filename}")
