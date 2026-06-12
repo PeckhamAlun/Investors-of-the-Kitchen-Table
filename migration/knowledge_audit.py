@@ -666,13 +666,13 @@ def main():
     # registry agent with a collection (not just the requested ones) for a fair
     # baseline — these are cheap MongoDB reads, no API calls.
     log("  Loading collections and sampling for vocabulary baseline...")
-    baseline_agents = list({*agents, *[a for a in AGENT_REGISTRY if load_collection(mongo_philosophy_collection(a))]})
+    baseline_agents = list({*agents, *[a for a in AGENT_REGISTRY if db[mongo_philosophy_collection(a)].count_documents({}) > 0]})
     docs_cache, meta_cache, all_freqs = {}, {}, {}
     for a in baseline_agents:
-        col = collections.get(a) or load_collection(mongo_philosophy_collection(a))
+        col = collections.get(a)
         if col is None:
-            continue
-        collections[a] = col
+            col = db[mongo_philosophy_collection(a)]
+            collections[a] = col
         # Fetch all docs except the (large) embedding vector — text + metadata only.
         all_docs = list(col.find({}, {"embedding": 0}))
         docs_cache[a] = [d.get("text", "") for d in all_docs if d.get("text")]
