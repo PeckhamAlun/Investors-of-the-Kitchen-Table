@@ -1,11 +1,17 @@
 """
 ==============================================================================
   ANALYSE COMPANY — AUTO INGESTION via yfinance + SEC EDGAR
+  (MongoDB Atlas + Gemini embeddings edition)
 ==============================================================================
 
   Pulls a company's financials automatically (no manual PDF dropping) and
-  loads them into the shared `company_financials` ChromaDB collection so the
-  debate engine can cite real numbers.
+  loads them into the shared `company_financials` MongoDB Atlas collection so
+  the debate engine can cite real numbers.
+
+  This is the MongoDB/Gemini counterpart of scripts/analyse_company.py. It uses
+  the SAME data-pull, computed-metrics, trend-analysis and SEC-EDGAR logic, then
+  swaps only the embedding model (Gemini gemini-embedding-001, 3072-dim, instead
+  of all-MiniLM-L6-v2) and the store (MongoDB Atlas instead of ChromaDB).
 
   Data layers, all written as clean human-readable text chunks:
     1. yfinance financials — income / balance / cash-flow, one quarter per chunk
@@ -13,27 +19,23 @@
     3. Computed metrics    — SBC %, FCF margin, YoY growth, gross-margin, Rule of 40
     4. SEC EDGAR           — last 4x 10-Q + 1x 10-K: MD&A, Risk Factors, Business
 
-  This is the planned-feature sibling of ingest_company.py (PDF-based). It does
-  NOT touch ingest_company.py and writes to the SAME collection with the SAME
-  wipe/append semantics, so the two are interchangeable per company.
-
   USAGE
   -----
-    py -3.11 scripts/analyse_company.py --ticker MDB
-    py -3.11 scripts/analyse_company.py --ticker MDB --exchange NASDAQ
-    py -3.11 scripts/analyse_company.py --ticker MDB --append
-    py -3.11 scripts/analyse_company.py --audit MongoDB
+    python scripts/analyse_company.py --ticker MDB
+    python scripts/analyse_company.py --ticker MDB --exchange NASDAQ
+    python scripts/analyse_company.py --ticker MDB --append
+    python scripts/analyse_company.py --audit MongoDB
 
   DEPENDENCIES
   ------------
-    py -3.11 -m pip install yfinance
-    (sentence-transformers, chromadb already present from the rest of the project)
+    py -3.11 -m pip install yfinance google-genai pymongo
 
-  No API key required — yfinance is free and keyless. SEC EDGAR is keyless too.
+  No API key required for yfinance / SEC EDGAR (both free + keyless). Embedding
+  needs GOOGLE_API_KEY; storage needs MONGODB_URI (both from .env via config.py).
 
   NOTE ON COMPANY NAMING
   ----------------------
-  The stored `company` metadata is routed through config.normalize_company() —
+  The stored `company` field is routed through config.normalize_company() —
   the SAME function main.py uses on --company — so retrieval always matches.
   Known camel-case names (MongoDB, CrowdStrike, ...) are preserved via the
   override table in config.py.
@@ -46,7 +48,7 @@ import sys
 import time
 import html
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Force UTF-8 stdout/stderr so the ═ box-drawing chars and emoji in the banners
 # don't raise UnicodeEncodeError on a Windows cp1252 console (CLAUDE.md §11).
@@ -56,46 +58,41 @@ try:
 except Exception:
     pass
 
-# ── torch + yfinance: ingest-only, and ORDER MATTERS ────────────────────────
-# Neither is needed by --audit or --list (those only read ChromaDB), so we skip
-# both in those modes — keeping them light and free of native-library conflicts.
-# When we DO import them, torch MUST come before yfinance: yfinance's native deps
-# initialise a runtime that makes torch's c10.dll fail to initialise (OSError
-# [WinError 1114]) if torch is imported afterwards. Confirmed empirically:
-# `import yfinance; import torch` -> WinError 1114, but `import torch; import yfinance` -> OK.
+# ── yfinance: ingest-only ────────────────────────────────────────────────────
+# Not needed by --audit or --list (those only read MongoDB), so we skip the
+# import in those modes — keeping them light. (No torch here: embeddings are now
+# remote via Gemini, so the old torch/yfinance DLL load-order dance is gone.)
 if not any(flag in sys.argv for flag in ("--audit", "--list")):
-    try:
-        import torch  # noqa: F401  (side-effect import: fixes DLL load order)
-    except Exception:
-        pass  # a genuine torch problem will resurface with a clear trace in ingest()
     try:
         import yfinance as yf
     except ImportError:
         sys.exit("ERROR: 'yfinance' is not installed.  Run:  py -3.11 -m pip install yfinance")
 
-# ── third-party (always needed: SEC uses requests; audit/list use chromadb) ──
+# ── third-party (always needed: SEC uses requests; storage uses pymongo) ──
 try:
     import requests
 except ImportError:
     sys.exit("ERROR: 'requests' is not installed.  Run:  py -3.11 -m pip install requests")
 
 try:
-    import chromadb
+    from pymongo.mongo_client import MongoClient
+    from pymongo.server_api import ServerApi
 except ImportError:
-    sys.exit("ERROR: 'chromadb' is not installed.")
+    sys.exit("ERROR: 'pymongo' is not installed.  Run:  py -3.11 -m pip install pymongo")
 
-# NOTE: sentence_transformers is imported lazily inside ingest() so --audit never
-# loads it. In ingest mode torch is already initialised by the load-order import
-# above (before yfinance), so SentenceTransformer just reuses it.
+# NOTE: google.genai is imported lazily inside ingest() so --audit/--list never
+# load it. They only read MongoDB.
 
 # ── project config (single source of truth) ──
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
-    CHROMA_DIR,
-    EMBED_MODEL,
+    MONGODB_URI,
+    MONGODB_DB_NAME,
+    GEMINI_EMBED_MODEL,
+    GOOGLE_API_KEY,
+    MONGO_COMPANY_COLLECTION,
     CHUNK_SIZE,
     CHUNK_OVERLAP,
-    COMPANY_COLLECTION,
     normalize_company,
 )
 
@@ -110,6 +107,10 @@ SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 CAP_MDNA   = 8000
 CAP_RISK   = 3000
 CAP_BIZ    = 3000
+
+# Gemini batch-embedding tuning (avoid rate limits)
+EMBED_BATCH_SIZE = 50    # chunks per Gemini embedding call
+BATCH_SLEEP_SECS = 0.5   # pause between batches
 
 
 # ==============================================================================
@@ -891,99 +892,118 @@ def pull_sec(name, ticker):
 
 
 # ==============================================================================
-# STEP 5 — CHROMADB INGESTION  (unchanged)
+# STEP 5 — MONGODB INGESTION  (Gemini embeddings)
 # ==============================================================================
 
+def embed_texts(gemini_client, texts):
+    """Embed a list of texts with Gemini gemini-embedding-001 -> list of vectors."""
+    result = gemini_client.models.embed_content(
+        model=GEMINI_EMBED_MODEL,
+        contents=texts,
+    )
+    return [list(e.values) for e in result.embeddings]
+
+
 def ingest(chunks, company_key, ticker, exchange, append):
-    """Embed and load chunks into company_financials. Returns (added, total)."""
+    """Embed (Gemini) and load chunks into company_financials (MongoDB Atlas).
+    Returns (added, total)."""
     if not chunks:
         print("\n  ERROR: no chunks were built — nothing to ingest.")
         sys.exit(1)
 
-    iso = datetime.now().isoformat(timespec="seconds")
+    # Imported here (not at module top) so --audit/--list never touch the Gemini
+    # client — they only read MongoDB.
+    try:
+        from google import genai
+    except ImportError:
+        sys.exit("ERROR: 'google-genai' is not installed.  Run:  py -3.11 -m pip install google-genai")
 
-    texts, metadatas, ids = [], [], []
+    if not GOOGLE_API_KEY:
+        sys.exit("ERROR: GOOGLE_API_KEY is not set (.env). Cannot embed.")
+    if not MONGODB_URI:
+        sys.exit("ERROR: MONGODB_URI is not set (.env). Cannot connect to MongoDB.")
+
+    iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    texts = [c["text"] for c in chunks]
+
+    print(f"\n  Loading embedding model: {GEMINI_EMBED_MODEL}")
+    gemini_client = genai.Client(api_key=GOOGLE_API_KEY)
+    print(f"  Embedding {len(texts):,} chunks (batches of {EMBED_BATCH_SIZE})...")
+
+    # ---- Batch embed (50 per call, 0.5s sleep between batches) ----
+    embeddings = []
+    for i in range(0, len(texts), EMBED_BATCH_SIZE):
+        j = min(i + EMBED_BATCH_SIZE, len(texts))
+        embeddings.extend(embed_texts(gemini_client, texts[i:j]))
+        print(f"  Embedded {j:,} / {len(texts):,} chunks")
+        if j < len(texts):
+            time.sleep(BATCH_SLEEP_SECS)
+
+    # ---- Build one MongoDB document per chunk ----
+    docs = []
     for n, c in enumerate(chunks):
-        texts.append(c["text"])
-        metadatas.append({
+        docs.append({
+            "_id":         f"company_{ticker}_{c['source_type']}_{n}",
+            "text":        c["text"],
+            "embedding":   embeddings[n],
             "company":     company_key,
             "ticker":      ticker,
-            "exchange":    exchange,
             "source":      c["source"],
             "source_type": c["source_type"],
             "period":      c.get("period", "Unknown"),
             "form_type":   c.get("form_type", "Unknown"),
             "ingested_at": iso,
         })
-        safe = re.sub(r"[^a-zA-Z0-9]", "_", f"{ticker}_{c['source_type']}_{c.get('period','')}")[:60]
-        ids.append(f"{safe}_{n}")
 
-    # Imported here (not at module top) so torch only loads when embedding is
-    # actually needed — keeps --audit and the data-pull phase torch-free.
-    try:
-        from sentence_transformers import SentenceTransformer
-    except ImportError:
-        sys.exit("ERROR: 'sentence-transformers' is not installed.")
-
-    print(f"\n  Loading embedding model: {EMBED_MODEL}")
-    model = SentenceTransformer(EMBED_MODEL)
-    print(f"  Embedding {len(texts):,} chunks...")
-    embeddings = model.encode(texts, show_progress_bar=True, batch_size=32)
-
-    print("  Connecting to ChromaDB...")
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
-    existing = [c.name for c in client.list_collections()]
+    print("  Connecting to MongoDB Atlas...")
+    client = MongoClient(MONGODB_URI, server_api=ServerApi('1'))
+    collection = client[MONGODB_DB_NAME][MONGO_COMPANY_COLLECTION]
 
     if not append:
-        if COMPANY_COLLECTION in existing:
-            print(f"  Wiping existing '{COMPANY_COLLECTION}' collection...")
-            client.delete_collection(COMPANY_COLLECTION)
-        collection = client.create_collection(name=COMPANY_COLLECTION,
-                                               metadata={"hnsw:space": "cosine"})
+        existing = collection.count_documents({"company": company_key})
+        if existing:
+            print(f"  Wiping existing '{company_key}' data ({existing:,} chunks)...")
+            collection.delete_many({"company": company_key})
     else:
-        if COMPANY_COLLECTION in existing:
-            collection = client.get_collection(COMPANY_COLLECTION)
-            print(f"  Appending — {collection.count():,} chunks already stored.")
-        else:
-            collection = client.create_collection(name=COMPANY_COLLECTION,
-                                                   metadata={"hnsw:space": "cosine"})
+        existing = collection.count_documents({"company": company_key})
+        print(f"  Appending — {existing:,} chunks already stored for '{company_key}'.")
 
     BATCH = 100
-    for i in range(0, len(texts), BATCH):
-        j = min(i + BATCH, len(texts))
-        collection.add(embeddings=embeddings[i:j].tolist(),
-                       documents=texts[i:j], metadatas=metadatas[i:j], ids=ids[i:j])
-        print(f"  Loaded {j:,} / {len(texts):,} chunks")
+    for i in range(0, len(docs), BATCH):
+        j = min(i + BATCH, len(docs))
+        collection.insert_many(docs[i:j])
+        print(f"  Loaded {j:,} / {len(docs):,} chunks")
 
-    return len(texts), collection.count()
+    total = collection.count_documents({})
+    client.close()
+    return len(docs), total
 
 
 # ==============================================================================
-# AUDIT — --audit <company>   (unchanged)
+# AUDIT — --audit <company>   (MongoDB)
 # ==============================================================================
 
 def list_companies():
     """Print every distinct company key stored in company_financials, with counts.
-    Lets you confirm the exact name to pass to --company / --audit. Torch-free."""
+    Lets you confirm the exact name to pass to --company / --audit."""
     from collections import Counter
     bar = "═" * 56
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
-    existing = [c.name for c in client.list_collections()]
+
+    if not MONGODB_URI:
+        sys.exit("ERROR: MONGODB_URI is not set (.env). Cannot connect to MongoDB.")
+    client = MongoClient(MONGODB_URI, server_api=ServerApi('1'))
+    collection = client[MONGODB_DB_NAME][MONGO_COMPANY_COLLECTION]
 
     print(f"\n{bar}")
-    print(f"COMPANIES IN '{COMPANY_COLLECTION}'")
+    print(f"COMPANIES IN '{MONGO_COMPANY_COLLECTION}'")
     print(bar)
 
-    if COMPANY_COLLECTION not in existing:
-        print("(collection does not exist yet — nothing ingested)")
-        print(bar)
-        return
-
-    coll = client.get_collection(COMPANY_COLLECTION)
-    metas = coll.get(include=["metadatas"]).get("metadatas") or []
+    metas = list(collection.find({}, {"company": 1, "ticker": 1}))
     if not metas:
-        print("(collection is empty)")
+        print("(collection is empty — nothing ingested)")
         print(bar)
+        client.close()
         return
 
     counts = Counter(m.get("company") for m in metas)
@@ -993,33 +1013,32 @@ def list_companies():
         print(f"   {n:>4} chunks   {name}{tag}")
     print(bar)
     print("Pass the exact name above to --company (debates) or --audit (detail).")
+    client.close()
 
 
 def run_audit(company_arg):
     company_key = normalize_company(company_arg)
     bar = "═" * 56
 
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
-    existing = [c.name for c in client.list_collections()]
-    if COMPANY_COLLECTION not in existing:
-        print(f"\n  '{COMPANY_COLLECTION}' collection does not exist yet. Nothing to audit.")
-        return
+    if not MONGODB_URI:
+        sys.exit("ERROR: MONGODB_URI is not set (.env). Cannot connect to MongoDB.")
+    client = MongoClient(MONGODB_URI, server_api=ServerApi('1'))
+    collection = client[MONGODB_DB_NAME][MONGO_COMPANY_COLLECTION]
 
-    coll = client.get_collection(COMPANY_COLLECTION)
-    res = coll.get(where={"company": company_key}, include=["documents", "metadatas"])
-    metas = res.get("metadatas") or []
-    docs  = res.get("documents") or []
+    metas = list(collection.find({"company": company_key}))
+    docs  = [m.get("text", "") for m in metas]
 
     print(f"\n{bar}")
     print(f"COMPANY FINANCIALS AUDIT — {company_arg}")
     print(bar)
 
     if not metas:
-        avail = sorted({m.get("company") for m in (coll.get(include=["metadatas"]).get("metadatas") or [])})
+        avail = sorted({m.get("company") for m in collection.find({}, {"company": 1})})
         print(f"No chunks found for '{company_key}'.")
         if avail:
             print(f"Companies currently in the collection: {', '.join(a for a in avail if a)}")
         print(bar)
+        client.close()
         return
 
     print(f"Total chunks : {len(metas)}\n")
@@ -1092,6 +1111,7 @@ def run_audit(company_arg):
     print(f"   {mark(tenk)} SEC 10-K filing      : {'present' if tenk else 'missing'}")
     print(f"   {mark(risk)} SEC Risk Factors     : {'present' if risk else 'missing'}")
     print(bar)
+    client.close()
 
 
 # ==============================================================================
@@ -1099,7 +1119,7 @@ def run_audit(company_arg):
 # ==============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Auto-ingest a company's financials (yfinance + SEC EDGAR).")
+    parser = argparse.ArgumentParser(description="Auto-ingest a company's financials (yfinance + SEC EDGAR) into MongoDB Atlas.")
     parser.add_argument("--ticker",   type=str, help="Ticker symbol, e.g. MDB")
     parser.add_argument("--exchange", type=str, default=None,
                         help="Exchange, e.g. NASDAQ (display/metadata only — yfinance fetches by ticker)")
@@ -1110,12 +1130,12 @@ def main():
                         help="List every company stored in company_financials (and exit)")
     args = parser.parse_args()
 
-    # ── List mode: just show what's stored, then exit (no torch, no network) ──
+    # ── List mode: just show what's stored, then exit (no yfinance, no network) ──
     if args.list:
         list_companies()
         return
 
-    # ── Audit mode: no ingestion, no network needed ──
+    # ── Audit mode: no ingestion, no yfinance needed ──
     if args.audit:
         run_audit(args.audit)
         return
@@ -1199,12 +1219,12 @@ def main():
     print(f"   SEC filings         : {count('sec_filing'):>3} chunks")
     print("   ──────────────────────────────")
     print(f"   Total added         : {added:>3} chunks")
-    print(f"   Collection          : {COMPANY_COLLECTION} ({total} total docs)")
+    print(f"   Collection          : {MONGO_COMPANY_COLLECTION} ({total} total docs)")
     print(f"   Stored as           : company='{company_key}'  (use this with --company)")
     print(f"   Time taken          : {elapsed:.1f}s")
     print(bar)
     print(f"\nRun audit to verify:")
-    print(f"   py -3.11 scripts/analyse_company.py --audit {company_key}")
+    print(f"   python scripts/analyse_company.py --audit {company_key}")
     print(f"\nReady to debate:")
     print(f'   py -3.11 main.py --topic "Is {display} a good investment?" --company {company_key} --agents buffett howard_marks')
 

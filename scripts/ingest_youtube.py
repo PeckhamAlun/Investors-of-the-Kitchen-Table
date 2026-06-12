@@ -1,11 +1,17 @@
 """
 ==============================================================================
-  INGEST_YOUTUBE.PY — YOUTUBE → PHILOSOPHY RAG BRAIN
-  Pulls a YouTube video's transcript and ingests it into an agent's ChromaDB
-  philosophy collection. Two-tier transcript pipeline:
+  INGEST_YOUTUBE.PY — YOUTUBE → PHILOSOPHY RAG BRAIN (MongoDB Atlas + Gemini)
+  Pulls a YouTube video's transcript and ingests it into an agent's MongoDB
+  Atlas philosophy collection using Gemini embeddings. Two-tier transcript
+  pipeline (identical to scripts/ingest_youtube.py):
 
       Tier 1  →  youtube-transcript-api  (free, instant — uses creator captions)
       Tier 2  →  yt-dlp audio + Whisper large-v3  (fallback when no captions)
+
+  This is the MongoDB/Gemini counterpart of scripts/ingest_youtube.py. The
+  yt-dlp / Whisper / caption-fetching / chunking logic is byte-for-byte the
+  same; only the embedding model (Gemini gemini-embedding-001, 3072-dim instead
+  of all-MiniLM-L6-v2) and the store (MongoDB Atlas instead of ChromaDB) change.
 
   All configuration is imported from config.py — nothing is hardcoded here.
 ==============================================================================
@@ -20,13 +26,12 @@
 
   INSTALL:
       py -3.11 -m pip install youtube-transcript-api yt-dlp openai-whisper
-      (chromadb, sentence-transformers, langchain already installed)
+      (pymongo, google-genai, langchain already installed)
 
   NOTES:
       - Tier 2 (Whisper) requires ffmpeg on PATH.
       - Temp audio is deleted immediately after transcription.
       - Re-ingesting a URL already in the collection is detected and skipped.
-      - No .env loading — any API key needed is a Windows environment variable.
 
 ==============================================================================
 """
@@ -37,12 +42,14 @@ import sys
 import time
 import argparse
 import warnings
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from sentence_transformers import SentenceTransformer
-import chromadb
+
+from google import genai
+from pymongo.mongo_client import MongoClient
+from pymongo.server_api import ServerApi
 
 # ==============================================================================
 # CONFIG — single source of truth (config.py)
@@ -51,8 +58,10 @@ import chromadb
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from config import (
-    CHROMA_DIR, EMBED_MODEL, CHUNK_SIZE, CHUNK_OVERLAP,
-    philosophy_collection, WHISPER_MODEL, WHISPER_LANGUAGE,
+    MONGODB_URI, MONGODB_DB_NAME,
+    GEMINI_EMBED_MODEL, GOOGLE_API_KEY,
+    CHUNK_SIZE, CHUNK_OVERLAP,
+    mongo_philosophy_collection, WHISPER_MODEL, WHISPER_LANGUAGE,
 )
 
 # Harden stdout so emoji / UTF-8 prints never raise under a non-UTF-8 console.
@@ -62,6 +71,14 @@ if hasattr(sys.stdout, "reconfigure"):
 # Whisper warns "FP16 is not supported on CPU; using FP32 instead" on every CPU
 # transcription. Harmless noise on a CPU box — silence it.
 warnings.filterwarnings("ignore", message="FP16 is not supported on CPU")
+
+
+# ==============================================================================
+# EMBEDDING / STORE BATCHING
+# ==============================================================================
+
+EMBED_BATCH_SIZE = 50    # chunks per Gemini embedding + insert batch
+BATCH_SLEEP_SECS = 0.5   # pause between batches to avoid rate limits
 
 
 # ==============================================================================
@@ -315,6 +332,19 @@ def looks_like_hallucination(text):
 
 
 # ==============================================================================
+# GEMINI EMBEDDING
+# ==============================================================================
+
+def embed_texts(client, texts):
+    """Embed a list of texts with Gemini, returning a list of vectors."""
+    result = client.models.embed_content(
+        model=GEMINI_EMBED_MODEL,
+        contents=texts,
+    )
+    return [e.values for e in result.embeddings]
+
+
+# ==============================================================================
 # PER-VIDEO PIPELINE
 # ==============================================================================
 
@@ -325,7 +355,7 @@ splitter = RecursiveCharacterTextSplitter(
 )
 
 
-def process_video(url, agent_name, collection, embed_model,
+def process_video(url, agent_name, collection, gemini_client,
                   language=WHISPER_LANGUAGE, allow_whisper=False):
     """Ingest one YouTube video into the agent's philosophy collection.
 
@@ -336,8 +366,7 @@ def process_video(url, agent_name, collection, embed_model,
     Returns True on success (or clean skip), False on failure.
     """
     # --- Duplicate detection (by URL) ------------------------------------------
-    existing = collection.get(where={"url": url}, limit=1)
-    if existing and existing.get("ids"):
+    if collection.find_one({"url": url}, {"_id": 1}):
         print(f"⏭️  Already ingested — skipping: {url}")
         return True
 
@@ -396,40 +425,46 @@ def process_video(url, agent_name, collection, embed_model,
         print("⚠️  No usable chunks after cleaning — skipping.")
         return False
 
-    ingested_at = datetime.now().isoformat()
-    metadatas = [
-        {
-            "source":      title,
-            "source_type": "youtube",
-            "url":         url,
-            "channel":     channel,
-            "agent":       agent_name,
-            "chunk":       i,
-            "ingested_at": ingested_at,
-        }
-        for i in range(len(chunks))
-    ]
-    ids = [f"{agent_name}_{video_id}_{i}" for i in range(len(chunks))]
+    # --- Embed + store in batches (Gemini embed → MongoDB insert) --------------
+    ingested_at = datetime.now(timezone.utc).isoformat()
+    n_chunks = len(chunks)
+    n_batches = (n_chunks + EMBED_BATCH_SIZE - 1) // EMBED_BATCH_SIZE
+    added = 0
 
-    # --- Embed -----------------------------------------------------------------
-    embeddings = embed_model.encode(chunks, show_progress_bar=False, batch_size=32)
+    for b in range(n_batches):
+        start = b * EMBED_BATCH_SIZE
+        end = min(start + EMBED_BATCH_SIZE, n_chunks)
+        batch_chunks = chunks[start:end]
 
-    # --- Store -----------------------------------------------------------------
-    BATCH_SIZE = 100
-    for i in range(0, len(chunks), BATCH_SIZE):
-        end = min(i + BATCH_SIZE, len(chunks))
-        collection.add(
-            embeddings=embeddings[i:end].tolist(),
-            documents=chunks[i:end],
-            metadatas=metadatas[i:end],
-            ids=ids[i:end],
-        )
+        print(f"   Embedding batch {b + 1}/{n_batches}...")
+        vectors = embed_texts(gemini_client, batch_chunks)
+
+        docs = []
+        for offset, (chunk, vec) in enumerate(zip(batch_chunks, vectors)):
+            idx = start + offset
+            docs.append({
+                "_id":         f"{agent_name}_{video_id}_{idx}",
+                "text":        chunk,
+                "embedding":   vec,
+                "source":      title,
+                "source_type": "youtube",
+                "url":         url,
+                "channel":     channel,
+                "agent":       agent_name,
+                "chunk":       idx,
+                "ingested_at": ingested_at,
+            })
+
+        collection.insert_many(docs)
+        added += len(docs)
+
+        time.sleep(BATCH_SLEEP_SECS)
 
     # --- Summary ---------------------------------------------------------------
-    total = collection.count()
+    total = collection.count_documents({})
     print(f'✅ Ingested: "{title}"')
     print(f"   Transcript : {source_tier}")
-    print(f"   Chunks added : {len(chunks)}")
+    print(f"   Chunks added : {added}")
     print(f"   Collection   : {collection.name} ({total:,} total docs)")
     return True
 
@@ -455,7 +490,7 @@ def read_url_list(list_path):
 # ==============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Ingest YouTube transcripts into an agent's RAG brain")
+    parser = argparse.ArgumentParser(description="Ingest YouTube transcripts into an agent's RAG brain (MongoDB + Gemini)")
     parser.add_argument("--agent", required=True, help="Agent name e.g. buffett, cathie_wood")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--url", help="Single YouTube URL to ingest")
@@ -502,23 +537,27 @@ def main():
         print(f"🍪 Using YouTube cookies from browser: {COOKIES_FROM_BROWSER}")
 
     agent_name = args.agent.lower().replace(" ", "_")
-    collection_name = philosophy_collection(agent_name)
+    collection_name = mongo_philosophy_collection(agent_name)
 
     print("=" * 60)
     print(f"  YouTube Ingestion — {agent_name.replace('_', ' ').title()}")
     print(f"  Collection: {collection_name}")
     print("=" * 60)
 
-    # ChromaDB collection (cosine — matches ingest_philosophy.py).
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
-    collection = client.get_or_create_collection(
-        name=collection_name,
-        metadata={"hnsw:space": "cosine"},
-    )
+    # --- Gemini client ---
+    if not GOOGLE_API_KEY:
+        print("\n  ERROR: GOOGLE_API_KEY is not set (.env). Cannot embed.")
+        sys.exit(1)
+    print(f"\n  Embedding model: {GEMINI_EMBED_MODEL}")
+    gemini_client = genai.Client(api_key=GOOGLE_API_KEY)
 
-    # Embedding model — loaded once, reused across the whole run.
-    print(f"\n  Loading embedding model: {EMBED_MODEL}\n")
-    embed_model = SentenceTransformer(EMBED_MODEL)
+    # --- MongoDB Atlas collection ---
+    if not MONGODB_URI:
+        print("\n  ERROR: MONGODB_URI is not set (.env). Cannot connect.")
+        sys.exit(1)
+    mongo_client = MongoClient(MONGODB_URI, server_api=ServerApi('1'))
+    db = mongo_client[MONGODB_DB_NAME]
+    collection = db[collection_name]
 
     if args.whisper:
         print("  Whisper fallback: ENABLED (caption-less videos will be downloaded)")
@@ -526,14 +565,16 @@ def main():
         print("  Whisper fallback: disabled (captions-only; caption-less videos skipped)")
 
     if args.url:
-        ok = process_video(args.url, agent_name, collection, embed_model,
+        ok = process_video(args.url, agent_name, collection, gemini_client,
                             language=args.language, allow_whisper=args.whisper)
+        mongo_client.close()
         sys.exit(0 if ok else 1)
 
     # Bulk mode
     urls = read_url_list(args.bulk)
     if not urls:
         print(f"⚠️  No URLs found in {args.bulk}")
+        mongo_client.close()
         return
 
     total = len(urls)
@@ -547,7 +588,7 @@ def main():
         print(f"▶️  Video {i} of {total}: {url}")
         print(f"{'=' * 60}")
         try:
-            ok = process_video(url, agent_name, collection, embed_model,
+            ok = process_video(url, agent_name, collection, gemini_client,
                                language=args.language, allow_whisper=args.whisper)
         except Exception as e:
             # Skip failures without aborting the batch.
@@ -559,6 +600,8 @@ def main():
     print(f"\n{'=' * 60}")
     print(f"🏁 Bulk complete: {succeeded} succeeded, {failed} failed (of {total}).")
     print(f"{'=' * 60}")
+
+    mongo_client.close()
 
 
 if __name__ == "__main__":

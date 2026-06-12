@@ -9,20 +9,20 @@
   USAGE:
 
   Query Buffett:
-      py -3.11 migration/query.py --agent buffett
+      py -3.11 scripts/query.py --agent buffett
 
   Query Cathie Wood:
-      py -3.11 migration/query.py --agent cathie_wood
+      py -3.11 scripts/query.py --agent cathie_wood
 
   Query any agent:
-      py -3.11 migration/query.py --agent <agent_name>
+      py -3.11 scripts/query.py --agent <agent_name>
 
   REQUIREMENTS:
   - Agent must have a philosophy collection in MongoDB Atlas
-    (run: py -3.11 migration/ingest_philosophy.py --agent <agent_name>)
+    (run: py -3.11 scripts/ingest_philosophy.py --agent <agent_name>)
   - Agent must have a system_prompt.txt in agents/<agent_name>/
   - company_financials collection must exist for financial queries
-    (run: py -3.11 migration/analyse_company.py --ticker <TICKER>)
+    (run: py -3.11 scripts/analyse_company.py --ticker <TICKER>)
 
 ==============================================================================
 """
@@ -103,7 +103,7 @@ existing = db.list_collection_names()
 # Philosophy collection — required
 if PHIL_COL not in existing:
     print(f"\n  ERROR: Philosophy collection '{PHIL_COL}' not found.")
-    print(f"  Run: py -3.11 migration/ingest_philosophy.py --agent {AGENT_NAME}")
+    print(f"  Run: py -3.11 scripts/ingest_philosophy.py --agent {AGENT_NAME}")
     sys.exit(1)
 
 phil_col = db[PHIL_COL]

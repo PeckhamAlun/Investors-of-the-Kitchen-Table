@@ -1,8 +1,8 @@
 """
 ==============================================================================
-  KNOWLEDGE_AUDIT.PY — KNOWLEDGE COVERAGE AUDIT (MongoDB Atlas + Gemini)
+  KNOWLEDGE_AUDIT.PY — KNOWLEDGE COVERAGE AUDIT
   Comprehensive coverage audit of every agent's philosophy collection in
-  MongoDB Atlas. For each agent it:
+  ChromaDB. For each agent it:
 
     1. Generates a custom 35-topic taxonomy from the agent's own corpus (Claude)
     2. Scores coverage of each topic (dynamic + a universal benchmark set)
@@ -11,27 +11,22 @@
     5. (all-agent mode) detects inter-agent retrieval overlap
     6. Builds a vocabulary fingerprint of each agent's distinctive terms
 
-  This is the MongoDB/Gemini counterpart of scripts/knowledge_audit.py. The
-  scoring logic is byte-for-byte identical; only the data fetching changes —
-  Gemini embeddings instead of all-MiniLM-L6-v2, and MongoDB Atlas
-  ($vectorSearch + find) instead of ChromaDB.
-
-  Read-only against MongoDB Atlas. The only outputs are the printed report and,
+  Read-only against ChromaDB. The only outputs are the printed report and,
   with --output, a saved .txt copy.
 
 ==============================================================================
 
   USAGE:
-      py -3.11 migration/knowledge_audit.py
-      py -3.11 migration/knowledge_audit.py --agent buffett
-      py -3.11 migration/knowledge_audit.py --output
+      py -3.11 scripts/knowledge_audit.py
+      py -3.11 scripts/knowledge_audit.py --agent buffett
+      py -3.11 scripts/knowledge_audit.py --output
 
   PERFORMANCE:
       ~2 Claude API calls per agent (taxonomy + batched debate framings), so
-      ~6 calls for 3 agents, plus many Gemini embeddings + MongoDB $vectorSearch
-      queries. Agents run sequentially to avoid rate limits. Every Claude call
-      degrades gracefully — on failure the agent falls back to the universal
-      topic set and the audit continues.
+      ~6 calls for 3 agents, plus many cheap ChromaDB queries. Agents run
+      sequentially to avoid rate limits. Every Claude call degrades gracefully
+      — on failure the agent falls back to the universal topic set and the
+      audit continues.
 
 ==============================================================================
 """
@@ -47,9 +42,8 @@ from collections import Counter, defaultdict
 from statistics import mean
 
 import anthropic
-from pymongo.mongo_client import MongoClient
-from pymongo.server_api import ServerApi
-from google import genai as google_genai
+import chromadb
+from sentence_transformers import SentenceTransformer
 
 # UTF-8 so the emoji / box-drawing report survives legacy consoles (Windows cp1252).
 try:
@@ -64,10 +58,8 @@ except Exception:
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from config import (
-    MONGODB_URI, MONGODB_DB_NAME,
-    GEMINI_EMBED_MODEL, GOOGLE_API_KEY,
-    AGENT_REGISTRY, mongo_philosophy_collection,
-    CLAUDE_MODEL, OUTPUTS_DIR,
+    CHROMA_DIR, EMBED_MODEL, AGENT_REGISTRY,
+    philosophy_collection, CLAUDE_MODEL, OUTPUTS_DIR,
 )
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -144,27 +136,13 @@ they're we're you're i'm he's she's there's that's what's let us per via etc amo
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# INITIALISE SHARED RESOURCES (same pattern as migration/ingest_philosophy.py)
+# INITIALISE SHARED RESOURCES (same pattern as ingest_philosophy.py)
 # ──────────────────────────────────────────────────────────────────────────
 
 print("\n  Initialising Knowledge Audit...", file=sys.stderr, flush=True)
-
-if not GOOGLE_API_KEY:
-    print("\n  ERROR: GOOGLE_API_KEY is not set (.env). Cannot embed.", file=sys.stderr, flush=True)
-    sys.exit(1)
-if not MONGODB_URI:
-    print("\n  ERROR: MONGODB_URI is not set (.env). Cannot connect.", file=sys.stderr, flush=True)
-    sys.exit(1)
-
-gemini_client    = google_genai.Client(api_key=GOOGLE_API_KEY)
-mongo_client     = MongoClient(MONGODB_URI, server_api=ServerApi('1'))
-db               = mongo_client[MONGODB_DB_NAME]
+embed_model      = SentenceTransformer(EMBED_MODEL)
+chroma_client    = chromadb.PersistentClient(path=CHROMA_DIR)
 anthropic_client = anthropic.Anthropic()
-
-# Known philosophy collections come from the registry; we confirm each one
-# actually exists (and is non-empty) in Atlas before auditing it. This replaces
-# ChromaDB's chroma_client.list_collections().
-_DB_COLLECTIONS = set(db.list_collection_names())
 
 
 # Report buffer — emit() prints AND accumulates for the optional --output file.
@@ -191,23 +169,10 @@ def display_name(agent: str) -> str:
 
 
 def load_collection(name: str):
-    """Return the MongoDB collection if it exists and is non-empty, else None.
-
-    MongoDB lazily creates collections on first insert, so an unbuilt agent has
-    no collection at all — mirror ChromaDB's "missing collection → None".
-    """
-    if name in _DB_COLLECTIONS and db[name].count_documents({}) > 0:
-        return db[name]
-    return None
-
-
-def embed_query(text: str) -> list:
-    """Embed a single query string with Gemini, returning a vector (list of floats)."""
-    result = gemini_client.models.embed_content(
-        model=GEMINI_EMBED_MODEL,
-        contents=text,
-    )
-    return list(result.embeddings[0].values)
+    try:
+        return chroma_client.get_collection(name)
+    except Exception:
+        return None
 
 
 def _strip_fences(text: str) -> str:
@@ -312,43 +277,23 @@ Return ONLY a JSON array of {TAXONOMY_SIZE} strings. No preamble, no explanation
 # ──────────────────────────────────────────────────────────────────────────
 
 def score_topic(collection, query: str) -> dict:
-    """Score one topic's coverage in a collection. 0–100 coverage score.
-
-    MongoDB $vectorSearch returns a similarity score directly (vectorSearchScore)
-    rather than a distance, so avg_sim is the mean of those scores — the rest of
-    the scoring formula is identical to scripts/knowledge_audit.py.
-    """
-    embedding = embed_query(query)
+    """Score one topic's coverage in a collection. 0–100 coverage score."""
+    embedding = embed_model.encode(query).tolist()
     try:
-        n = min(N_RESULTS, collection.count_documents({}))
-        if n <= 0:
-            raise ValueError("empty collection")
-        results = list(collection.aggregate([
-            {
-                "$vectorSearch": {
-                    "index": "vector_index",
-                    "path": "embedding",
-                    "queryVector": embedding,
-                    "numCandidates": 50,
-                    "limit": n,
-                }
-            },
-            {
-                "$project": {
-                    "text": 1,
-                    "score": {"$meta": "vectorSearchScore"},
-                }
-            },
-        ]))
+        results = collection.query(
+            query_embeddings=[embedding],
+            n_results=min(N_RESULTS, collection.count()),
+            include=["documents", "distances"],
+        )
     except Exception:
         return {"query": query, "count": 0, "similarity": 0.0,
                 "score": 0.0, "symbol": "❌", "label": "GAP", "docs": []}
 
-    docs    = [r.get("text", "") for r in results]
-    sims    = [r.get("score", 0.0) for r in results]
-    count   = len(docs)
-    avg_sim = mean(sims) if sims else 0.0
-    score   = max(0.0, min(100.0, (count / N_RESULTS) * avg_sim * 100))
+    docs      = results["documents"][0]
+    distances = results["distances"][0]
+    count     = len(docs)
+    avg_sim   = (1 - mean(distances)) if distances else 0.0
+    score     = max(0.0, min(100.0, (count / N_RESULTS) * avg_sim * 100))
     symbol, label = status_for(score)
     return {"query": query, "count": count, "similarity": avg_sim,
             "score": score, "symbol": symbol, "label": label, "docs": docs}
@@ -490,7 +435,7 @@ def audit_agent(agent: str, collection, docs: list[str], metadatas: list[dict],
     div = analyse_sources(metadatas)
 
     emit("=" * 56)
-    emit(f"{name.upper()}  —  {collection.count_documents({}):,} docs  |  {div['unique']} sources")
+    emit(f"{name.upper()}  —  {collection.count():,} docs  |  {div['unique']} sources")
     emit("=" * 56)
     emit()
 
@@ -634,7 +579,7 @@ def emit_shared_retrieval(universal_overlap: dict) -> None:
 # ──────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Kitchen Table — Knowledge Coverage Audit (MongoDB + Gemini)")
+    parser = argparse.ArgumentParser(description="Kitchen Table — Knowledge Coverage Audit")
     parser.add_argument("--agent", type=str, default=None,
                         help="Audit a single agent (default: all agents in the registry)")
     parser.add_argument("--output", action="store_true",
@@ -650,7 +595,7 @@ def main():
     # Keep only agents that actually have a philosophy collection.
     agents, collections = [], {}
     for a in requested:
-        col = load_collection(mongo_philosophy_collection(a))
+        col = load_collection(philosophy_collection(a))
         if col is None:
             log(f"  WARNING: no philosophy collection for '{a}' — skipping")
             continue
@@ -664,19 +609,18 @@ def main():
     # ── Pre-pass: load docs + metadata once per agent; build vocab baseline ──
     # The fingerprint compares each agent against the OTHERS, so we sample every
     # registry agent with a collection (not just the requested ones) for a fair
-    # baseline — these are cheap MongoDB reads, no API calls.
+    # baseline — these are cheap ChromaDB reads, no API calls.
     log("  Loading collections and sampling for vocabulary baseline...")
-    baseline_agents = list({*agents, *[a for a in AGENT_REGISTRY if db[mongo_philosophy_collection(a)].count_documents({}) > 0]})
+    baseline_agents = list({*agents, *[a for a in AGENT_REGISTRY if load_collection(philosophy_collection(a))]})
     docs_cache, meta_cache, all_freqs = {}, {}, {}
     for a in baseline_agents:
-        col = collections.get(a)
+        col = collections.get(a) or load_collection(philosophy_collection(a))
         if col is None:
-            col = db[mongo_philosophy_collection(a)]
-            collections[a] = col
-        # Fetch all docs except the (large) embedding vector — text + metadata only.
-        all_docs = list(col.find({}, {"embedding": 0}))
-        docs_cache[a] = [d.get("text", "") for d in all_docs if d.get("text")]
-        meta_cache[a] = all_docs
+            continue
+        collections[a] = col
+        data = col.get(include=["documents", "metadatas"])
+        docs_cache[a] = [d for d in data["documents"] if d]
+        meta_cache[a] = data["metadatas"] or []
         if docs_cache[a]:
             all_freqs[a] = term_frequencies(docs_cache[a])
         log(f"    {display_name(a)}: {len(docs_cache[a]):,} chunks loaded")
