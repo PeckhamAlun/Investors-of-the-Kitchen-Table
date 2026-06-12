@@ -23,10 +23,11 @@ import re
 import sys
 import argparse
 import anthropic
-import chromadb
 from datetime import datetime
 from pathlib import Path
-from sentence_transformers import SentenceTransformer
+from pymongo.mongo_client import MongoClient
+from pymongo.server_api import ServerApi
+from google import genai as google_genai
 from langgraph.graph import StateGraph, END
 from typing import TypedDict, List
 
@@ -40,7 +41,10 @@ from config import (
     CLAUDE_MODEL, MAX_TOKENS,
     COMPANY_COLLECTION, philosophy_collection,
     system_prompt_path, OUTPUTS_DIR,
-    AGENT_DISPLAY, AGENT_COLOURS, normalize_company
+    AGENT_DISPLAY, AGENT_COLOURS, normalize_company,
+    MONGODB_URI, MONGODB_DB_NAME, GEMINI_EMBED_MODEL,
+    GOOGLE_API_KEY, mongo_philosophy_collection,
+    MONGO_COMPANY_COLLECTION
 )
 
 # ==============================================================================
@@ -207,25 +211,20 @@ def generate_round_title(topic: str, client: anthropic.Anthropic) -> str:
 # ==============================================================================
 
 print("\n  Initialising Kitchen Table...")
-embed_model      = SentenceTransformer(EMBED_MODEL)
-chroma_client    = chromadb.PersistentClient(path=CHROMA_DIR)
+mongo_client     = MongoClient(MONGODB_URI, server_api=ServerApi('1'))
+db               = mongo_client[MONGODB_DB_NAME]
+gemini_client    = google_genai.Client(api_key=GOOGLE_API_KEY)
 anthropic_client = anthropic.Anthropic()
 
 
 def load_collection(name: str):
-    try:
-        return chroma_client.get_collection(name)
-    except Exception:
-        return None
+    """Returns MongoDB collection — always exists (Atlas creates on first insert)."""
+    return db[name]
 
 
 def available_companies() -> list[str]:
-    """Distinct company names currently ingested in the financials collection."""
-    col = load_collection(COMPANY_COLLECTION)
-    if col is None:
-        return []
-    data = col.get(include=["metadatas"])
-    return sorted({m.get("company") for m in data["metadatas"] if m.get("company")})
+    col = db[MONGO_COMPANY_COLLECTION]
+    return sorted(col.distinct("company"))
 
 
 def load_system_prompt(agent: str) -> str:
@@ -244,64 +243,88 @@ def retrieve_records(
     company: str | None,
     intent: str = "general",
 ) -> tuple[list[dict], list[str]]:
-    """
-    Core retrieval. Returns one structured record per retrieved chunk plus the
-    expansion queries used. Both retrieve_context (which builds the debate
-    prompt) and print_retrieval_report (the --audit view + scripts/audit_rag.py)
-    build on this, so the engine and the auditor can never diverge.
-    """
     expansions = build_expansions(query, intent, company)
     comp_results_per_query = 3 if intent in ("financials", "growth") else 2
-
-    phil_collection = load_collection(philosophy_collection(agent))
-    comp_collection = load_collection(COMPANY_COLLECTION) if company else None
 
     seen_ids: set = set()
     records: list[dict] = []
 
     for q in expansions:
-        embedding = embed_model.encode(q).tolist()
+        # Embed query using Gemini
+        result = gemini_client.models.embed_content(
+            model=GEMINI_EMBED_MODEL,
+            contents=q
+        )
+        embedding = list(result.embeddings[0].values)
 
-        if phil_collection:
-            try:
-                results = phil_collection.query(
-                    query_embeddings=[embedding],
-                    n_results=min(3, phil_collection.count()),
-                )
-                for i, doc in enumerate(results["documents"][0]):
-                    doc_id = results["ids"][0][i]
-                    if doc_id not in seen_ids:
-                        seen_ids.add(doc_id)
-                        meta = results["metadatas"][0][i] or {}
-                        records.append({
-                            "collection": "philosophy",
-                            "source":     meta.get("source", "philosophy"),
-                            "filename":   meta.get("filename", ""),
-                            "doc":        doc,
-                        })
-            except Exception:
-                pass
+        # Query philosophy collection
+        phil_col = db[mongo_philosophy_collection(agent)]
+        phil_results = phil_col.aggregate([
+            {
+                "$vectorSearch": {
+                    "index": "vector_index",
+                    "path": "embedding",
+                    "queryVector": embedding,
+                    "numCandidates": 50,
+                    "limit": 3,
+                    "filter": {"agent": agent}
+                }
+            },
+            {
+                "$project": {
+                    "text": 1,
+                    "source": 1,
+                    "agent": 1,
+                    "score": {"$meta": "vectorSearchScore"}
+                }
+            }
+        ])
 
-        if comp_collection and company:
-            try:
-                results = comp_collection.query(
-                    query_embeddings=[embedding],
-                    n_results=min(comp_results_per_query, comp_collection.count()),
-                    where={"company": company} if company else None,
-                )
-                for i, doc in enumerate(results["documents"][0]):
-                    doc_id = results["ids"][0][i]
-                    if doc_id not in seen_ids:
-                        seen_ids.add(doc_id)
-                        meta = results["metadatas"][0][i] or {}
-                        records.append({
-                            "collection": "company",
-                            "source":     meta.get("source", f"{company} financials"),
-                            "filename":   meta.get("filename", ""),
-                            "doc":        doc,
-                        })
-            except Exception:
-                pass
+        for doc in phil_results:
+            doc_id = str(doc["_id"])
+            if doc_id not in seen_ids:
+                seen_ids.add(doc_id)
+                records.append({
+                    "collection": "philosophy",
+                    "source": doc.get("source", "philosophy"),
+                    "filename": doc.get("source", ""),
+                    "doc": doc.get("text", ""),
+                })
+
+        # Query company financials
+        if company:
+            comp_col = db[MONGO_COMPANY_COLLECTION]
+            comp_results = comp_col.aggregate([
+                {
+                    "$vectorSearch": {
+                        "index": "vector_index",
+                        "path": "embedding",
+                        "queryVector": embedding,
+                        "numCandidates": 50,
+                        "limit": comp_results_per_query,
+                        "filter": {"company": company}
+                    }
+                },
+                {
+                    "$project": {
+                        "text": 1,
+                        "source": 1,
+                        "company": 1,
+                        "score": {"$meta": "vectorSearchScore"}
+                    }
+                }
+            ])
+
+            for doc in comp_results:
+                doc_id = str(doc["_id"])
+                if doc_id not in seen_ids:
+                    seen_ids.add(doc_id)
+                    records.append({
+                        "collection": "company",
+                        "source": doc.get("source", f"{company} financials"),
+                        "filename": doc.get("source", ""),
+                        "doc": doc.get("text", ""),
+                    })
 
     return records, expansions
 
@@ -855,18 +878,16 @@ def _financial_snapshot_data(company: str | None) -> dict | None:
     the PDF simply skips the page rather than crashing."""
     if not company:
         return None
-    col = load_collection(COMPANY_COLLECTION)
-    if col is None:
-        return None
+    col = db[MONGO_COMPANY_COLLECTION]
     try:
-        res = col.get(where={"company": company}, include=["documents", "metadatas"])
+        docs = list(col.find({"company": company}))
     except Exception:
         return None
 
     rows = [
-        (m or {}, d or "")
-        for m, d in zip(res.get("metadatas") or [], res.get("documents") or [])
-        if (m or {}).get("source_type") in ("computed_metrics", "yfinance_financials", "yfinance_metrics")
+        (doc, doc.get("text", ""))
+        for doc in docs
+        if doc.get("source_type") in ("computed_metrics", "yfinance_financials", "yfinance_metrics")
     ]
     if not rows:
         return None
