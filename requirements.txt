@@ -1,31 +1,28 @@
-# Kitchen Table - Python dependencies (Python 3.11, Windows)
-# Built from an import scan of the codebase.
+# Kitchen Table — Streamlit Community Cloud dependencies
+# Python 3.11
+# Only the packages needed to run app.py (debate engine + UI).
+# Ingestion-only tools (yt-dlp, whisper, pdfplumber, etc.) are excluded.
 
-# --- Core: needed to run a debate (main.py, query.py, config.py) ---
+# ── Web UI ──
+streamlit>=1.30.0
+
+# ── Debate engine (main.py imports) ──
 anthropic
-chromadb
-sentence-transformers
+google-genai
 langgraph
 langchain-core
-langchain-text-splitters
-reportlab
-prompt_toolkit
-numpy
 
-# --- Ingestion: companies + philosophy (scripts/) ---
-pdfplumber
-pypdf                 # scripts/split_memo_collection.py
+# ── Database ──
+pymongo[srv]
+
+# ── Company / market data ──
+yfinance
 requests
+numpy
 python-dateutil
-pymongo               # analyse_company.py stores company_financials in MongoDB
-yfinance              # analyse_company.py pulls financials
 
-# --- YouTube ingest (ingest_youtube.py, pull_transcripts.py, youtube_processor.py) ---
-yt-dlp
-youtube-transcript-api
-openai-whisper        # also pulls in torch (large download); needs ffmpeg on PATH
-python-dotenv         # youtube_processor.py uses load_dotenv
+# ── PDF transcript output ──
+reportlab
 
-# --- DB visualiser (scripts/visualise_db.py) ---
-umap-learn
-plotly
+# ── Config / secrets ──
+python-dotenv

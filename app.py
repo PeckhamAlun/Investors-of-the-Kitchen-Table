@@ -35,6 +35,16 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ── Inject Streamlit secrets → os.environ (Streamlit Community Cloud) ──
+# On the cloud, secrets live in st.secrets (set in the Cloud dashboard).
+# Locally, they come from .env via config.py's load_dotenv() — no secrets.toml needed.
+for _key in ("ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "MONGODB_URI"):
+    try:
+        if _key in st.secrets:
+            os.environ.setdefault(_key, st.secrets[_key])
+    except Exception:
+        pass  # local dev without a secrets.toml — fall through to .env
+
 import yfinance as yf
 from pymongo import MongoClient
 from pymongo.server_api import ServerApi
@@ -74,7 +84,7 @@ PERIOD_MAP = {"1M": "1mo", "3M": "3mo", "6M": "6mo", "1Y": "1y"}
 # ==============================================================================
 
 _DEFAULTS = {
-    "view":           "home",     # "home" | "company" | "debate"
+    "view":           "home",     # "home" | "company"
     "ticker":         "",
     "company":        "",
     "agents":         [],
@@ -83,9 +93,13 @@ _DEFAULTS = {
     "debate_history": [],
     "pdf_path":       None,
     "recent":         [],
+    "search_results": [],         # list of {"symbol": str, "name": str, "exchange": str}
     "chart_period":   "6M",
     "collapsed":      False,
     "debate_done":    False,
+    "debate_active":  False,      # True once a debate is launched on the company page
+    "all_rounds":     [],         # list of round dicts {round, topic, title, history} for PDF
+    "round_num":      1,          # current debate round number
 }
 for k, v in _DEFAULTS.items():
     if k not in st.session_state:
@@ -102,13 +116,23 @@ def go_to_ticker(ticker: str) -> None:
     st.session_state["ticker"] = ticker
     st.session_state["company"] = ""
     st.session_state["view"] = "company"
+    st.session_state["search_results"] = []
+    # New company — clear any debate from the previous one.
+    st.session_state.update({
+        "debate_active":  False,
+        "debate_done":    False,
+        "debate_history": [],
+        "pdf_path":       None,
+        "all_rounds":     [],
+        "round_num":      1,
+    })
 
 
 # ==============================================================================
 # GLOBAL CSS
 # ==============================================================================
 
-SIDEBAR_WIDTH = "60px" if st.session_state["collapsed"] else "220px"
+SIDEBAR_WIDTH = "220px"
 
 st.markdown(f"""
 <style>
@@ -120,11 +144,17 @@ html, body, [class*="css"] {{
 .block-container {{ padding-top: 1.2rem; padding-bottom: 3rem; max-width: 1200px; }}
 header[data-testid="stHeader"] {{ background: transparent; }}
 
-/* ── Sidebar: dark navy, fixed width ── */
+/* ── Hide Streamlit's sidebar collapse toggle ── */
+[data-testid="stSidebarCollapseButton"] {{ display: none !important; }}
+button[aria-label="Close sidebar"] {{ display: none !important; }}
+
+/* ── Sidebar: dark navy, fixed width, always visible ── */
 [data-testid="stSidebar"] {{
     background: {NAVY};
     min-width: {SIDEBAR_WIDTH}; max-width: {SIDEBAR_WIDTH};
     border-right: 1px solid #1E293B;
+    transform: translateX(0) !important;
+    visibility: visible !important;
 }}
 [data-testid="stSidebar"] * {{ color: #F1F5F9; }}
 [data-testid="stSidebar"] .stTextInput input {{
@@ -159,6 +189,10 @@ header[data-testid="stHeader"] {{ background: transparent; }}
 /* ── Inputs in the main area ── */
 .stTextInput input, .stTextArea textarea, .stNumberInput input {{
     border-radius: 12px; border: 1px solid {BORDER}; background: #FFFFFF;
+    color: #1E293B !important;
+}}
+input, textarea {{
+    color: #1E293B !important;
 }}
 
 /* ── Reusable card primitives (markdown HTML blocks) ── */
@@ -199,6 +233,58 @@ div[data-testid="stExpander"] summary {{
 
 /* ── Checkbox agent cards ── */
 .stCheckbox {{ background: #FFFFFF; border-radius: 12px; }}
+
+/* ── Hero search button — prevent text wrap ── */
+[data-testid="stBaseButton-secondaryFormSubmit"] {{
+    white-space: nowrap !important;
+}}
+
+/* ── Main area text fix (white-on-white bug) ── */
+section[data-testid="stMain"] {{
+    color: #1E293B;
+}}
+section[data-testid="stMain"] p,
+section[data-testid="stMain"] label,
+section[data-testid="stMain"] .stMarkdown,
+section[data-testid="stMain"] .stTextInput label,
+section[data-testid="stMain"] .stNumberInput label,
+section[data-testid="stMain"] .stTextArea label,
+section[data-testid="stMain"] .stCheckbox label,
+section[data-testid="stMain"] .stSelectbox label {{
+    color: #1E293B !important;
+}}
+
+/* ── Period selector buttons (1M/3M/6M/1Y) — dark with white text ── */
+section[data-testid="stMain"] [data-testid="stBaseButton-secondary"] {{
+    background: #1E293B !important;
+    color: #FFFFFF !important;
+    border: none !important;
+    border-radius: 8px !important;
+    font-size: 0.8rem !important;
+}}
+section[data-testid="stMain"] [data-testid="stBaseButton-secondary"] p,
+section[data-testid="stMain"] [data-testid="stBaseButton-secondary"] span {{
+    color: #FFFFFF !important;
+}}
+section[data-testid="stMain"] [data-testid="stBaseButton-secondary"]:hover {{
+    background: #334155 !important;
+    color: #FFFFFF !important;
+}}
+
+/* ── Market ticker scroll animation ── */
+@keyframes kt-scroll {{
+    0%   {{ transform: translateX(0); }}
+    100% {{ transform: translateX(-50%); }}
+}}
+.kt-ticker {{
+    display: inline-flex;
+    align-items: center;
+    animation: kt-scroll 28s linear infinite;
+    white-space: nowrap;
+}}
+.kt-ticker:hover {{
+    animation-play-state: paused;
+}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -257,12 +343,23 @@ def trend_arrow(curr: float | None, prev: float | None,
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_indices() -> list[tuple[str, float, float]]:
-    """[(label, last close, % change)] for Dow / S&P 500 / Nasdaq."""
+    """[(label, last close, % change)] for major global indices."""
+    INDICES = [
+        ("^DJI",   "Dow"),
+        ("^GSPC",  "S&P 500"),
+        ("^IXIC",  "Nasdaq"),
+        ("^RUT",   "Russell"),
+        ("^N225",  "Nikkei"),
+        ("^STI",   "SGX"),
+        ("^FTSE",  "FTSE"),
+        ("^KS11",  "KOSPI"),
+    ]
     out = []
+    syms = " ".join(s for s, _ in INDICES)
     try:
-        data = yf.download("^DJI ^GSPC ^IXIC", period="2d", progress=False)
+        data = yf.download(syms, period="2d", progress=False)
         closes = data["Close"]
-        for sym, label in [("^DJI", "Dow Jones"), ("^GSPC", "S&P 500"), ("^IXIC", "Nasdaq")]:
+        for sym, label in INDICES:
             try:
                 series = closes[sym].dropna()
                 last, prev = float(series.iloc[-1]), float(series.iloc[-2])
@@ -288,6 +385,72 @@ def fetch_closes(ticker: str, period: str):
         return yf.download(ticker, period=period, progress=False)["Close"]
     except Exception:
         return None
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def search_tickers(query: str) -> list[dict]:
+    """Return up to 6 ticker matches for a company name or partial ticker."""
+    try:
+        results = yf.Search(query, max_results=6).quotes
+        out = []
+        for r in results:
+            symbol = r.get("symbol", "")
+            name = r.get("shortname") or r.get("longname") or ""
+            exchange = r.get("exchDisp") or r.get("exchange") or ""
+            if symbol and name:
+                out.append({"symbol": symbol, "name": name, "exchange": exchange})
+        return out
+    except Exception:
+        return []
+
+
+def handle_search_submit(query: str) -> None:
+    """Route a search submission: exact-looking ticker → straight to the company
+    view; otherwise fuzzy-match company names and show a results list to pick."""
+    query = query.strip()
+    if not query:
+        return
+    # Looks like a ticker already (1-5 letters) — go direct.
+    if re.match(r'^[A-Za-z]{1,5}$', query):
+        go_to_ticker(query)
+        st.rerun()
+    else:
+        results = search_tickers(query)
+        if len(results) == 1:
+            go_to_ticker(results[0]["symbol"])
+            st.rerun()
+        elif results:
+            st.session_state["search_results"] = results
+            st.rerun()
+        else:
+            st.warning(f"No results found for '{query}'")
+
+
+def render_search_results(key_prefix: str = "pick") -> None:
+    """Render the fuzzy-search results list with a Select button per row.
+    `key_prefix` keeps button keys unique when shown in more than one place."""
+    if not st.session_state["search_results"]:
+        return
+    st.markdown('<div style="max-width:480px;margin:0.6rem auto 0 auto;">',
+                unsafe_allow_html=True)
+    for r in st.session_state["search_results"]:
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            st.markdown(
+                f'<div style="padding:0.4rem 0;font-size:0.92rem;">'
+                f'<b style="color:#0F172A;">{esc(r["symbol"])}</b> '
+                f'<span style="color:#64748B;">{esc(r["name"])}</span> '
+                f'<span style="color:#94A3B8;font-size:0.78rem;">{esc(r["exchange"])}</span>'
+                f'</div>',
+                unsafe_allow_html=True
+            )
+        with col2:
+            if st.button("Select", key=f"{key_prefix}_{r['symbol']}",
+                         use_container_width=True):
+                st.session_state["search_results"] = []
+                go_to_ticker(r["symbol"])
+                st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -381,53 +544,50 @@ def block_series(blocks: dict, prefix: str) -> list[tuple[str, float]]:
 # ==============================================================================
 
 with st.sidebar:
-    if st.session_state["collapsed"]:
-        st.markdown('<div style="text-align:center;font-size:1.6rem;">🪑</div>',
-                    unsafe_allow_html=True)
-        if st.button("»", key="expand", help="Expand sidebar"):
-            st.session_state["collapsed"] = False
-            st.rerun()
-    else:
+    st.markdown(
+        '<div style="font-size:1.25rem;font-weight:700;">🪑 Kitchen Table</div>'
+        f'<div style="color:#94A3B8;font-size:0.8rem;margin-bottom:0.8rem;">Equity Research</div>',
+        unsafe_allow_html=True,
+    )
+
+    with st.form("sidebar_search", clear_on_submit=True, border=False):
+        side_q = st.text_input("Search", placeholder="Search ticker...",
+                               label_visibility="collapsed")
+        if st.form_submit_button("Search", use_container_width=True) and side_q:
+            handle_search_submit(side_q)
+
+    st.markdown('<div style="height:0.6rem;"></div>', unsafe_allow_html=True)
+
+    # Navigation — Insights is live; the rest are placeholders.
+    if st.button("◈  Insights", key="nav_insights", use_container_width=True):
+        st.session_state["view"] = "home"
+        st.rerun()
+    def _soon_item(icon: str, label: str) -> str:
+        return (
+            '<div style="display:flex;align-items:center;justify-content:space-between;'
+            'padding:0.45rem 0.7rem;color:#94A3B8;cursor:default;user-select:none;">'
+            f'<span style="color:#94A3B8;">{icon}&nbsp;&nbsp;{label}</span>'
+            '<span style="background:#1E293B;color:#94A3B8;font-size:0.6rem;'
+            'font-weight:700;letter-spacing:0.06em;padding:0.1rem 0.45rem;'
+            'border-radius:6px;border:1px solid #334155;">SOON</span>'
+            '</div>')
+
+    st.markdown(f"""
+        <div style="background:{BLUE};border-radius:8px;height:3px;
+                    margin:-0.5rem 0 0.4rem 0;"></div>
+        {_soon_item("☆", "Watchlists")}
+        {_soon_item("📈", "Charts")}
+        {_soon_item("📅", "Earnings")}
+    """, unsafe_allow_html=True)
+
+    if st.session_state["recent"]:
         st.markdown(
-            '<div style="font-size:1.25rem;font-weight:700;">🪑 Kitchen Table</div>'
-            f'<div style="color:#94A3B8;font-size:0.8rem;margin-bottom:0.8rem;">Equity Research</div>',
-            unsafe_allow_html=True,
-        )
-
-        with st.form("sidebar_search", clear_on_submit=True, border=False):
-            side_q = st.text_input("Search", placeholder="Search ticker...",
-                                   label_visibility="collapsed")
-            if st.form_submit_button("Search", use_container_width=True) and side_q:
-                go_to_ticker(side_q)
+            '<div style="color:#94A3B8;font-size:0.72rem;letter-spacing:0.12em;'
+            'margin-top:1.2rem;">RECENT</div>', unsafe_allow_html=True)
+        for t in st.session_state["recent"]:
+            if st.button(f"• {t}", key=f"recent_{t}", use_container_width=True):
+                go_to_ticker(t)
                 st.rerun()
-
-        st.markdown('<div style="height:0.6rem;"></div>', unsafe_allow_html=True)
-
-        # Navigation — Insights is live; the rest are placeholders.
-        if st.button("◈  Insights", key="nav_insights", use_container_width=True):
-            st.session_state["view"] = "home"
-            st.rerun()
-        st.markdown(f"""
-            <div style="background:{BLUE};border-radius:8px;height:3px;
-                        margin:-0.5rem 0 0.4rem 0;"></div>
-            <div style="color:#64748B;padding:0.45rem 0.7rem;">☆  Watchlists</div>
-            <div style="color:#64748B;padding:0.45rem 0.7rem;">📈  Charts</div>
-            <div style="color:#64748B;padding:0.45rem 0.7rem;">📅  Earnings</div>
-        """, unsafe_allow_html=True)
-
-        if st.session_state["recent"]:
-            st.markdown(
-                '<div style="color:#94A3B8;font-size:0.72rem;letter-spacing:0.12em;'
-                'margin-top:1.2rem;">RECENT</div>', unsafe_allow_html=True)
-            for t in st.session_state["recent"]:
-                if st.button(f"• {t}", key=f"recent_{t}", use_container_width=True):
-                    go_to_ticker(t)
-                    st.rerun()
-
-        st.markdown('<div style="height:2rem;"></div>', unsafe_allow_html=True)
-        if st.button("«  Collapse", key="collapse"):
-            st.session_state["collapsed"] = True
-            st.rerun()
 
 
 # ==============================================================================
@@ -440,21 +600,23 @@ def render_top_bar() -> None:
         colour = GREEN if chg >= 0 else RED
         sign = "+" if chg >= 0 else ""
         cells.append(
-            f'<span style="margin-right:1.6rem;">'
-            f'<span style="color:{MUTED};font-size:0.8rem;">{label}</span> '
-            f'<b style="font-size:0.88rem;">{value:,.0f}</b> '
-            f'<span style="color:{colour};font-size:0.8rem;">{sign}{chg:.2f}%</span>'
+            f'<span style="margin-right:1.6rem;white-space:nowrap;">'
+            f'<span style="color:{MUTED};font-size:0.74rem;font-weight:500;">{label}</span>'
+            f'<span style="color:{colour};font-size:0.74rem;margin-left:0.3rem;">{sign}{chg:.2f}%</span>'
             f'</span>'
         )
-    indices_html = "".join(cells) or f'<span class="kt-muted">Indices unavailable</span>'
-    today = datetime.now().strftime("%A, %d %B %Y")
+    items_html = "".join(cells)
+    # Duplicate items for seamless loop
+    ticker_html = items_html + items_html if items_html else f'<span style="color:{MUTED};font-size:0.74rem;">Indices unavailable</span>'
+    today = datetime.now().strftime("%a, %d %b %Y")
     st.markdown(f"""
         <div style="background:#FFFFFF;border:1px solid {BORDER};border-radius:12px;
-                    box-shadow:0 1px 3px rgba(0,0,0,0.04);padding:0.6rem 1.2rem;
-                    margin-bottom:1.4rem;display:flex;justify-content:space-between;
-                    align-items:center;">
-            <div>{indices_html}</div>
-            <div style="color:{MUTED};font-size:0.85rem;">{today}</div>
+                    box-shadow:0 1px 3px rgba(0,0,0,0.04);padding:0.5rem 1.2rem;
+                    margin-bottom:1.4rem;display:flex;align-items:center;">
+            <div style="overflow:hidden;flex:1;min-width:0;">
+                <div class="kt-ticker">{ticker_html}</div>
+            </div>
+            <div style="color:#0F172A;font-size:0.84rem;font-weight:700;white-space:nowrap;margin-left:1rem;flex-shrink:0;">{today}</div>
         </div>
     """, unsafe_allow_html=True)
 
@@ -472,22 +634,23 @@ def render_home() -> None:
             <div style="font-size:2.6rem;font-weight:800;color:#0F172A;
                         margin:0.4rem 0 0.2rem 0;">Research any company. In minutes.</div>
             <div style="color:{MUTED};font-size:1.05rem;margin-bottom:1.6rem;">
-                5 legendary investors working side by side with you.</div>
+                Legendary investors working side by side with you.</div>
         </div>
     """, unsafe_allow_html=True)
 
-    _, mid, _ = st.columns([1, 2, 1])
+    _, mid, _ = st.columns([0.2, 3.6, 0.2])
     with mid:
         with st.form("hero_search", clear_on_submit=True, border=False):
             c1, c2 = st.columns([5, 1])
             with c1:
                 q = st.text_input("Ticker", label_visibility="collapsed",
-                                  placeholder="Enter a ticker — MDB, DDOG, NVDA, SHOP...")
+                                  placeholder="Company name or ticker — MongoDB, MDB, Nvidia...")
             with c2:
                 submitted = st.form_submit_button("Research", use_container_width=True)
             if submitted and q:
-                go_to_ticker(q)
-                st.rerun()
+                handle_search_submit(q)
+
+        render_search_results("pick")
 
         if st.session_state["recent"]:
             chip_cols = st.columns(len(st.session_state["recent"]))
@@ -497,18 +660,6 @@ def render_home() -> None:
                         go_to_ticker(t)
                         st.rerun()
 
-    # Agent preview row
-    pills = "".join(
-        f'<span style="display:inline-flex;align-items:center;background:#FFFFFF;'
-        f'border:1px solid {BORDER};border-radius:999px;padding:0.3rem 0.9rem 0.3rem 0.35rem;'
-        f'margin:0.25rem;box-shadow:0 1px 3px rgba(0,0,0,0.04);">'
-        f'<span class="kt-avatar" style="background:{hex_colour(a)};width:26px;height:26px;'
-        f'font-size:0.68rem;border-radius:999px;">{initials(AGENT_DISPLAY[a])}</span>'
-        f'<span style="font-size:0.85rem;color:#0F172A;">{esc(AGENT_DISPLAY[a])}</span></span>'
-        for a in ACTIVE_AGENTS
-    )
-    st.markdown(f'<div style="text-align:center;margin-top:2.2rem;">{pills}</div>',
-                unsafe_allow_html=True)
 
 
 # ==============================================================================
@@ -605,7 +756,7 @@ def render_metric_cards(company: str) -> None:
 
 
 def render_price_chart(ticker: str) -> None:
-    st.markdown('<div class="kt-card" style="padding-bottom:0.4rem;">'
+    st.markdown('<div class="kt-card" style="padding-bottom:0.4rem;text-align:center;">'
                 '<b>Share price</b></div>', unsafe_allow_html=True)
     btn_cols = st.columns([1, 1, 1, 1, 8])
     for col, period in zip(btn_cols, PERIOD_MAP):
@@ -715,7 +866,9 @@ def render_kitchen_table_panel(company: str) -> None:
                     "debate_history": [],
                     "pdf_path":       None,
                     "debate_done":    False,
-                    "view":           "debate",
+                    "debate_active":  True,   # render inline below, same page
+                    "all_rounds":     [],     # fresh debate — reset rounds
+                    "round_num":      1,
                 })
                 st.rerun()
 
@@ -737,10 +890,11 @@ def render_company() -> None:
     render_price_chart(ticker)
     render_quarterly_table(company)
     render_kitchen_table_panel(company)
+    render_debate_inline(company)
 
 
 # ==============================================================================
-# VIEW 3 — DEBATE OUTPUT
+# DEBATE OUTPUT — rendered inline on the company page (below the panel)
 # ==============================================================================
 
 def parse_response(text: str) -> tuple[str, list[str], list[str], list[str]]:
@@ -801,10 +955,52 @@ def turn_card_html(entry: dict) -> str:
     """
 
 
+def _inline_md(s: str) -> str:
+    """Convert inline markdown in ALREADY-ESCAPED text: **bold** -> <b>bold</b>.
+    (esc() leaves '*' untouched, so the markers survive to here.)"""
+    return re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", s)
+
+
+def md_to_html(text: str) -> str:
+    """Render a Claude markdown response as clean card HTML:
+      '## Header'  -> bold section title (no '#' shown)
+      '- item'     -> bulleted line (no raw '-'/'*' shown)
+      '**bold**'   -> <b>bold</b>
+      blank line   -> paragraph break
+    Everything is HTML-escaped first, so no raw markup leaks through."""
+    parts, para = [], []
+
+    def flush_para():
+        if para:
+            parts.append(
+                f'<p style="font-size:0.92rem;margin:0.5rem 0;">{" ".join(para)}</p>')
+            para.clear()
+
+    for raw in text.split("\n"):
+        line = raw.strip()
+        if not line:
+            flush_para()
+            continue
+        header = re.match(r"^#{1,6}\s+(.*)$", line)
+        bullet = re.match(r"^[-*]\s+(.*)$", line)
+        if header:
+            flush_para()
+            parts.append(
+                '<div style="font-weight:700;color:#0F172A;font-size:0.98rem;'
+                f'margin:0.7rem 0 0.25rem 0;">{_inline_md(esc(header.group(1)))}</div>')
+        elif bullet:
+            flush_para()
+            parts.append(
+                '<div style="font-size:0.92rem;margin:0.15rem 0 0.15rem 0.4rem;">'
+                f'• {_inline_md(esc(bullet.group(1)))}</div>')
+        else:
+            para.append(_inline_md(esc(line)))
+    flush_para()
+    return "".join(parts)
+
+
 def synthesis_card_html(entry: dict) -> str:
-    paragraphs = "".join(
-        f'<p style="font-size:0.92rem;margin:0.5rem 0;">{esc(p.strip())}</p>'
-        for p in entry["response"].split("\n\n") if p.strip())
+    body = md_to_html(entry["response"])
     return f"""
         <div class="kt-card" style="background:{BLUE_LIGHT};border-color:{BLUE};">
             <div style="display:flex;align-items:center;margin-bottom:0.4rem;">
@@ -812,34 +1008,64 @@ def synthesis_card_html(entry: dict) -> str:
                       background:{BLUE};margin-right:0.55rem;"></span>
                 <b style="color:#0F172A;">Analyst Synthesis</b>
             </div>
-            {paragraphs}
+            {body}
         </div>
     """
 
 
 def render_history(history: list[dict], placeholder) -> None:
-    cards = [
-        synthesis_card_html(h) if h["agent"] == "synthesis" else turn_card_html(h)
-        for h in history
-    ]
-    placeholder.markdown("".join(cards), unsafe_allow_html=True)
+    # Render each card as its OWN st.markdown so every card is a clean,
+    # self-contained HTML block. Concatenating them into a single markdown call
+    # makes Streamlit's parser treat only the first card as HTML and escape the
+    # rest to raw text (the synthesis card was dumping its <div> tags on screen).
+    # placeholder.container() keeps the st.empty holding a single child, so each
+    # streaming update still replaces the previous render cleanly.
+    multi_round = len({h.get("round", 1) for h in history}) > 1
+    last_round = None
+    with placeholder.container():
+        for h in history:
+            rnd = h.get("round", 1)
+            if multi_round and rnd != last_round:
+                rnd_topic = esc(h.get("topic", "")) if h.get("topic") else ""
+                topic_html = (f'<span class="kt-muted" style="margin-left:0.7rem;'
+                              f'font-size:0.82rem;">“{rnd_topic}”</span>'
+                              if rnd_topic else
+                              '<span style="flex:1;"></span>')
+                st.markdown(
+                    f'<div style="margin:1.2rem 0 0.4rem 0;display:flex;align-items:center;">'
+                    f'<span style="background:{NAVY};color:#FFFFFF;font-size:0.72rem;'
+                    f'font-weight:700;letter-spacing:0.08em;padding:0.2rem 0.7rem;'
+                    f'border-radius:999px;white-space:nowrap;">ROUND {rnd}</span>'
+                    f'{topic_html}'
+                    f'</div>', unsafe_allow_html=True)
+                last_round = rnd
+            card = (synthesis_card_html(h) if h["agent"] == "synthesis"
+                    else turn_card_html(h))
+            st.markdown(card, unsafe_allow_html=True)
 
 
-def stream_round_live(topic, company, agents, turns, placeholder) -> list[dict]:
+def stream_round_live(topic, company, agents, turns, placeholder,
+                      session_history=None, round_num=1) -> list[dict]:
     """Run one debate round, updating the display after every agent turn.
     Uses the engine's own graph via .stream() — same orchestration as
     run_round(), but yields state after each node. Falls back to the plain
-    blocking run_round() if streaming isn't available."""
+    blocking run_round() if streaming isn't available.
+
+    `session_history` carries forward the full transcript of prior rounds so
+    the agents (and the graph's per-round synthesis) can reference earlier
+    rounds. Returns the FULL accumulated history (prior rounds + this round)."""
+    session_history = list(session_history or [])
     try:
         intent = engine.classify_topic_intent(topic)
         graph = engine.build_debate_graph()
         state = {
             "topic": topic, "company": company, "intent": intent,
-            "agents": agents, "turns": turns, "history": [],
-            "turn": 1, "agent_index": 0, "round": 1,
+            "agents": agents, "turns": turns,
+            "history": session_history,   # carry full prior history in (not [])
+            "turn": 1, "agent_index": 0, "round": round_num,
             "finished": False, "audit": False,
         }
-        history = []
+        history = session_history
         limit = turns * len(agents) + 10
         for snapshot in graph.stream(state, config={"recursion_limit": limit},
                                      stream_mode="values"):
@@ -847,77 +1073,107 @@ def stream_round_live(topic, company, agents, turns, placeholder) -> list[dict]:
             render_history(history, placeholder)
         return history
     except Exception:
-        history = run_round(topic, company, agents, turns, 1, [], audit=False)
+        history = run_round(topic, company, agents, turns, round_num,
+                            session_history, audit=False)
         render_history(history, placeholder)
         return history
 
 
-def render_debate() -> None:
-    topic   = st.session_state["topic"]
-    company = st.session_state["company"]
-    agents  = st.session_state["agents"]
-    turns   = st.session_state["turns"]
+def render_debate_inline(company: str) -> None:
+    """Render the debate output directly on the company page, below the Kitchen
+    Table panel. Streams live, then shows the PDF download — no separate view."""
+    if not st.session_state.get("debate_active"):
+        return
 
-    if not (topic and company and agents):
-        st.session_state["view"] = "home"
-        st.rerun()
+    topic  = st.session_state["topic"]
+    agents = st.session_state["agents"]
+    turns  = st.session_state["turns"]
+    if not (topic and agents):
+        return
 
-    # Header row
+    # Section header + a way to dismiss the output.
+    rounds_done = len(st.session_state["all_rounds"])
+    header_topic = (st.session_state["all_rounds"][0]["topic"]
+                    if rounds_done else topic)
+    round_note = (f' &nbsp;|&nbsp; {rounds_done} round{"s" if rounds_done != 1 else ""}'
+                  if rounds_done > 1 else "")
     left, right = st.columns([3, 1])
     with left:
         st.markdown(f"""
-            <div style="font-size:1.5rem;font-weight:800;color:#0F172A;">
-                {esc(company)} <span style="color:{MUTED};font-weight:500;">· Debate Output</span></div>
+            <div style="font-size:1.4rem;font-weight:800;color:#0F172A;margin-top:0.6rem;">
+                Debate Output</div>
             <div class="kt-muted">{esc(" · ".join(display_name(a) for a in agents))}
                 &nbsp;|&nbsp; {turns} turn{"s" if turns != 1 else ""} per agent
-                &nbsp;|&nbsp; {datetime.now().strftime("%d %B %Y")}</div>
-            <div class="kt-muted" style="margin-bottom:1rem;">“{esc(topic)}”</div>
+                &nbsp;|&nbsp; {datetime.now().strftime("%d %B %Y")}{round_note}</div>
+            <div class="kt-muted" style="margin-bottom:1rem;">“{esc(header_topic)}”</div>
         """, unsafe_allow_html=True)
     with right:
-        if st.session_state["pdf_path"] and os.path.exists(st.session_state["pdf_path"]):
-            with open(st.session_state["pdf_path"], "rb") as f:
-                st.download_button("⬇ Download PDF", f,
-                                   file_name=os.path.basename(st.session_state["pdf_path"]),
-                                   mime="application/pdf", use_container_width=True)
-        if st.button(f"← Back to {st.session_state['ticker']}", use_container_width=True):
-            st.session_state["view"] = "company"
-            st.rerun()
+        if st.session_state["debate_done"]:
+            st.markdown('<div style="height:1.2rem;"></div>', unsafe_allow_html=True)
+            if st.button("✕  Clear debate", use_container_width=True):
+                st.session_state.update({
+                    "debate_active": False, "debate_done": False,
+                    "debate_history": [], "pdf_path": None,
+                    "all_rounds": [], "round_num": 1,
+                })
+                st.rerun()
 
     placeholder = st.empty()
+    round_num = st.session_state["round_num"]
 
     if not st.session_state["debate_done"]:
         with st.spinner("The investors are taking their seats..."):
-            history = stream_round_live(topic, company, agents, turns, placeholder)
+            # Carry the full prior-rounds transcript in as session_history so
+            # this round's agents can reference earlier rounds.
+            history = stream_round_live(
+                topic, company, agents, turns, placeholder,
+                session_history=st.session_state["debate_history"],
+                round_num=round_num,
+            )
         st.session_state["debate_history"] = history
 
-        # Save the PDF via the engine's own writer
+        # Slice out just THIS round's entries and record it for the PDF, then
+        # regenerate the PDF with every round included.
+        round_history = [h for h in history if h.get("round") == round_num]
         title = engine.generate_round_title(topic, engine.anthropic_client)
-        all_rounds = [{"round": 1, "topic": topic, "title": title, "history": history}]
+        st.session_state["all_rounds"].append({
+            "round": round_num, "topic": topic, "title": title,
+            "history": round_history,
+        })
         try:
-            st.session_state["pdf_path"] = save_pdf(all_rounds, agents, company, turns)
+            st.session_state["pdf_path"] = save_pdf(
+                st.session_state["all_rounds"], agents, company, turns)
         except SystemExit:
             st.error("PDF generation failed — is reportlab installed?")
         st.session_state["debate_done"] = True
+        # Rerun so the transcript renders exactly once on a clean pass. The
+        # live writes into `placeholder` during streaming are discarded by the
+        # rerun, avoiding the double-render that dumped raw HTML at the end.
         st.rerun()
 
+    # Clean pass (debate_done is True): render the full transcript once.
     render_history(st.session_state["debate_history"], placeholder)
 
+    # ── Follow-up round: only after the current round is done ──
+    st.markdown('<div style="height:0.6rem;"></div>', unsafe_allow_html=True)
+    with st.container():
+        st.markdown(f'<div class="kt-eyebrow" style="margin-bottom:0.4rem;">'
+                    f'Continue the conversation</div>', unsafe_allow_html=True)
+        follow_up = st.text_area(
+            "Follow-up", label_visibility="collapsed", height=80,
+            key=f"followup_{round_num}",
+            placeholder="Ask a follow-up question...")
+        if st.button("▶  Continue the Debate", type="primary",
+                     key=f"continue_{round_num}"):
+            if follow_up.strip():
+                # Keep debate_history and all_rounds intact; just start a new
+                # round that builds on everything so far.
+                st.session_state["round_num"] = round_num + 1
+                st.session_state["topic"] = follow_up.strip()
+                st.session_state["debate_done"] = False
+                st.rerun()
+            else:
+                st.warning("Enter a follow-up question.")
+
     if st.session_state["pdf_path"] and os.path.exists(st.session_state["pdf_path"]):
-        with open(st.session_state["pdf_path"], "rb") as f:
-            st.download_button("⬇ Download Full PDF Report", f,
-                               file_name=os.path.basename(st.session_state["pdf_path"]),
-                               mime="application/pdf", key="pdf_bottom")
-
-
-# ==============================================================================
-# ROUTER
-# ==============================================================================
-
-render_top_bar()
-
-if st.session_state["view"] == "company":
-    render_company()
-elif st.session_state["view"] == "debate":
-    render_debate()
-else:
-    render_home()
+        with open(st.session_state["pdf_path"], "rb") as f
