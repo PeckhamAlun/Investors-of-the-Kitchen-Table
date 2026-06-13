@@ -56,7 +56,15 @@ import yfinance as yf
 from pymongo import MongoClient
 from pymongo.server_api import ServerApi
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Put the project root AND its scripts/ subfolder on sys.path, using absolute
+# paths so this works identically on Windows locally and Linux on Streamlit
+# Cloud. Root → import the engine (main, config); scripts/ → import the
+# in-process company-ingest entry point (analyse_company), which isn't a
+# package. Must run BEFORE the imports below.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _p in (_HERE, os.path.join(_HERE, "scripts")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 # Importing main initialises the engine's shared clients (Mongo, Gemini,
 # Anthropic) once per Streamlit process — exactly what the debate needs.
@@ -66,11 +74,10 @@ from config import (MONGODB_URI, MONGODB_DB_NAME, MONGO_COMPANY_COLLECTION,
                     AGENT_REGISTRY, AGENT_DISPLAY, AGENT_COLOURS,
                     normalize_company, system_prompt_path)
 
-# Company-ingest pipeline lives in scripts/analyse_company.py. scripts/ is not a
-# package, so add it to the path and import the in-process entry point directly.
-# This replaces the old `py -3.11 scripts/analyse_company.py` subprocess, which
-# can't run on Streamlit Cloud's Linux runners (no `py` launcher).
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts"))
+# Company-ingest pipeline lives in scripts/analyse_company.py (added to sys.path
+# above). Import the in-process entry point directly — this replaces the old
+# `py -3.11 scripts/analyse_company.py` subprocess, which can't run on Streamlit
+# Cloud's Linux runners (no `py` launcher).
 from analyse_company import run_ingest
 
 mongo_client = MongoClient(MONGODB_URI, server_api=ServerApi('1'))
