@@ -18,11 +18,18 @@
 ==============================================================================
 """
 
+# Make ALL annotations lazy (PEP 563) so modern type-hint syntax — PEP 604
+# unions (`float | None`) and PEP 585 builtin generics (`list[dict]`) used in
+# the function signatures below — is stored as strings and never evaluated at
+# import time. Without this, importing on Python < 3.10 (e.g. Streamlit Cloud's
+# default interpreter) raises TypeError at import and the app fails to start.
+# MUST be the first statement after the module docstring.
+from __future__ import annotations
+
 import os
 import re
 import sys
 import html
-import subprocess
 from datetime import datetime
 
 import streamlit as st
@@ -58,6 +65,13 @@ from main import run_round, save_pdf, display_name
 from config import (MONGODB_URI, MONGODB_DB_NAME, MONGO_COMPANY_COLLECTION,
                     AGENT_REGISTRY, AGENT_DISPLAY, AGENT_COLOURS,
                     normalize_company, system_prompt_path)
+
+# Company-ingest pipeline lives in scripts/analyse_company.py. scripts/ is not a
+# package, so add it to the path and import the in-process entry point directly.
+# This replaces the old `py -3.11 scripts/analyse_company.py` subprocess, which
+# can't run on Streamlit Cloud's Linux runners (no `py` launcher).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts"))
+from analyse_company import run_ingest
 
 mongo_client = MongoClient(MONGODB_URI, server_api=ServerApi('1'))
 db = mongo_client[MONGODB_DB_NAME]
@@ -476,34 +490,29 @@ def company_key_for_ticker(ticker: str) -> str | None:
 
 def ensure_company_data(ticker: str) -> str | None:
     """Make sure `ticker` is loaded in company_financials; return its company
-    key. Pulls via scripts/analyse_company.py (which wipes by default — the
-    engine debates one company at a time) only when the ticker isn't already
-    loaded."""
+    key. Runs the ingest pipeline IN-PROCESS (analyse_company.run_ingest, which
+    wipes by default — the engine debates one company at a time) only when the
+    ticker isn't already loaded. Works the same on Windows locally and on
+    Streamlit Cloud's Linux runners — no subprocess / `py` launcher needed."""
     existing = company_key_for_ticker(ticker)
     if existing:
         return existing
 
     with st.spinner(f"Pulling financial data for {ticker}... (yfinance + SEC EDGAR, ~1-2 min)"):
-        result = subprocess.run(
-            ["py", "-3.11", "scripts/analyse_company.py", "--ticker", ticker, "--yes"],
-            capture_output=True, text=True,
-            cwd=os.path.dirname(os.path.abspath(__file__)),
-            encoding="utf-8", errors="replace",
-            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-        )
+        try:
+            # assume_yes=True == the CLI's --yes flag (skip the confirm prompt).
+            key = run_ingest(ticker, assume_yes=True)
+        except SystemExit as e:
+            # run_ingest calls sys.exit() on fatal errors (bad ticker, no data,
+            # missing keys). In-process that surfaces as SystemExit — catch it.
+            st.error(f"Could not ingest **{ticker}** — {e or 'ingestion failed'}.")
+            return None
+        except Exception as e:
+            st.error(f"Could not ingest **{ticker}** — {type(e).__name__}: {e}")
+            return None
 
-    if result.returncode != 0:
-        st.error(f"Could not ingest **{ticker}** — analyse_company.py failed.")
-        tail = (result.stderr or result.stdout or "").strip()[-1500:]
-        if tail:
-            st.code(tail)
-        return None
-
-    key = company_key_for_ticker(ticker)
-    if not key:
-        m = re.search(r"company='([^']+)'", result.stdout or "")
-        key = m.group(1) if m else None
-    return key
+    # Prefer the key returned by run_ingest; fall back to a fresh DB lookup.
+    return key or company_key_for_ticker(ticker)
 
 
 def parse_computed_blocks(company: str) -> dict[str, list[tuple[str, float]]]:
@@ -1176,4 +1185,19 @@ def render_debate_inline(company: str) -> None:
                 st.warning("Enter a follow-up question.")
 
     if st.session_state["pdf_path"] and os.path.exists(st.session_state["pdf_path"]):
-        with open(st.session_state["pdf_path"], "rb") as f
+        with open(st.session_state["pdf_path"], "rb") as f:
+            st.download_button("⬇ Download Full PDF Report", f,
+                               file_name=os.path.basename(st.session_state["pdf_path"]),
+                               mime="application/pdf", key="pdf_bottom")
+
+
+# ==============================================================================
+# ROUTER
+# ==============================================================================
+
+render_top_bar()
+
+if st.session_state["view"] == "company":
+    render_company()
+else:
+    render_home()
