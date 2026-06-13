@@ -244,10 +244,11 @@ def ticker_is_valid(info):
     return info.get("regularMarketPrice") is not None
 
 
-def resolve_ticker(ticker, info, exchange):
+def resolve_ticker(ticker, info, exchange, assume_yes=False):
     """
     Validate the ticker via yfinance .info and confirm with the user.
     --exchange (if given) is used only for display/metadata, not data fetching.
+    --yes (assume_yes) skips the confirmation prompt (non-interactive callers).
     Returns dict: {name, ticker, exchange, sector, industry}.
     """
     ticker = ticker.upper()
@@ -262,10 +263,13 @@ def resolve_ticker(ticker, info, exchange):
     print(f"\n  🔍 Found: {name} ({ticker}) — {exch}")
     if sector or industry:
         print(f"     Sector: {sector or '?'} | Industry: {industry or '?'}")
-    confirm = input("     Confirm ingestion? [Y/n]: ").strip().lower()
-    if confirm in ("n", "no"):
-        print("  Cancelled.")
-        sys.exit(0)
+    if assume_yes:
+        print("     Confirm ingestion? [Y/n]: y  (auto-confirmed via --yes)")
+    else:
+        confirm = input("     Confirm ingestion? [Y/n]: ").strip().lower()
+        if confirm in ("n", "no"):
+            print("  Cancelled.")
+            sys.exit(0)
 
     return {"name": name, "ticker": ticker, "exchange": exch,
             "sector": sector, "industry": industry}
@@ -1128,6 +1132,8 @@ def main():
                         help="Audit what is already ingested for COMPANY, then exit")
     parser.add_argument("--list",      action="store_true",
                         help="List every company stored in company_financials (and exit)")
+    parser.add_argument("--yes", "-y", action="store_true",
+                        help="Skip the 'Confirm ingestion? [Y/n]' prompt and proceed automatically")
     args = parser.parse_args()
 
     # ── List mode: just show what's stored, then exit (no yfinance, no network) ──
@@ -1161,7 +1167,7 @@ def main():
         print(f"  Check the symbol and try again.")
         sys.exit(1)
 
-    resolved = resolve_ticker(ticker, info, args.exchange)
+    resolved = resolve_ticker(ticker, info, args.exchange, assume_yes=args.yes)
     exchange = resolved["exchange"]
 
     # STEP 2 — yfinance pull
