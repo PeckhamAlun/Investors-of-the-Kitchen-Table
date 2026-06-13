@@ -1119,39 +1119,20 @@ def run_audit(company_arg):
 
 
 # ==============================================================================
-# MAIN
+# INGEST PIPELINE — reusable entry point (CLI + in-process callers, e.g. app.py)
 # ==============================================================================
 
-def main():
-    parser = argparse.ArgumentParser(description="Auto-ingest a company's financials (yfinance + SEC EDGAR) into MongoDB Atlas.")
-    parser.add_argument("--ticker",   type=str, help="Ticker symbol, e.g. MDB")
-    parser.add_argument("--exchange", type=str, default=None,
-                        help="Exchange, e.g. NASDAQ (display/metadata only — yfinance fetches by ticker)")
-    parser.add_argument("--append",   action="store_true", help="Add alongside existing company data instead of wiping")
-    parser.add_argument("--audit",    type=str, default=None, metavar="COMPANY",
-                        help="Audit what is already ingested for COMPANY, then exit")
-    parser.add_argument("--list",      action="store_true",
-                        help="List every company stored in company_financials (and exit)")
-    parser.add_argument("--yes", "-y", action="store_true",
-                        help="Skip the 'Confirm ingestion? [Y/n]' prompt and proceed automatically")
-    args = parser.parse_args()
+def run_ingest(ticker, exchange=None, append=False, assume_yes=False):
+    """Run the full auto-ingest pipeline for `ticker` (yfinance + computed
+    metrics + trend analysis + SEC EDGAR) and load it into company_financials.
 
-    # ── List mode: just show what's stored, then exit (no yfinance, no network) ──
-    if args.list:
-        list_companies()
-        return
-
-    # ── Audit mode: no ingestion, no yfinance needed ──
-    if args.audit:
-        run_audit(args.audit)
-        return
-
-    if not args.ticker:
-        print("\n  ERROR: --ticker is required (or use --audit <company>).")
-        sys.exit(1)
-
+    `assume_yes=True` skips the interactive confirmation prompt — pass this from
+    non-interactive callers (the web app, cron, etc.). Returns the stored
+    `company_key` (use it with --company / retrieval). Fatal problems raise
+    SystemExit (CLI) which in-process callers can catch.
+    """
     start = datetime.now()
-    ticker = args.ticker.upper()
+    ticker = ticker.upper()
 
     # STEP 1 — validate ticker via yfinance .info (no API key)
     print(f"\n  Validating ticker '{ticker}' via yfinance...")
@@ -1167,7 +1148,7 @@ def main():
         print(f"  Check the symbol and try again.")
         sys.exit(1)
 
-    resolved = resolve_ticker(ticker, info, args.exchange, assume_yes=args.yes)
+    resolved = resolve_ticker(ticker, info, exchange, assume_yes=assume_yes)
     exchange = resolved["exchange"]
 
     # STEP 2 — yfinance pull
@@ -1206,7 +1187,7 @@ def main():
     all_chunks = market_chunks + computed_chunks + trend_chunks + sec_chunks
 
     # STEP 5 — ingest
-    added, total = ingest(all_chunks, company_key, ticker, exchange, args.append)
+    added, total = ingest(all_chunks, company_key, ticker, exchange, append)
 
     # STEP 6 — summary
     def count(stype):
@@ -1233,6 +1214,47 @@ def main():
     print(f"   python scripts/analyse_company.py --audit {company_key}")
     print(f"\nReady to debate:")
     print(f'   py -3.11 main.py --topic "Is {display} a good investment?" --company {company_key} --agents buffett howard_marks')
+
+    return company_key
+
+
+# ==============================================================================
+# MAIN
+# ==============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(description="Auto-ingest a company's financials (yfinance + SEC EDGAR) into MongoDB Atlas.")
+    parser.add_argument("--ticker",   type=str, help="Ticker symbol, e.g. MDB")
+    parser.add_argument("--exchange", type=str, default=None,
+                        help="Exchange, e.g. NASDAQ (display/metadata only — yfinance fetches by ticker)")
+    parser.add_argument("--append",   action="store_true", help="Add alongside existing company data instead of wiping")
+    parser.add_argument("--audit",    type=str, default=None, metavar="COMPANY",
+                        help="Audit what is already ingested for COMPANY, then exit")
+    parser.add_argument("--list",      action="store_true",
+                        help="List every company stored in company_financials (and exit)")
+    parser.add_argument("--yes", "-y", action="store_true",
+                        help="Skip the 'Confirm ingestion? [Y/n]' prompt and proceed automatically")
+    args = parser.parse_args()
+
+    # ── List mode: just show what's stored, then exit (no yfinance, no network) ──
+    if args.list:
+        list_companies()
+        return
+
+    # ── Audit mode: no ingestion, no yfinance needed ──
+    if args.audit:
+        run_audit(args.audit)
+        return
+
+    if not args.ticker:
+        print("\n  ERROR: --ticker is required (or use --audit <company>).")
+        sys.exit(1)
+
+    # All the real work lives in run_ingest() so the web app (and any other
+    # in-process caller) can reuse it without shelling out. --yes maps to
+    # assume_yes so the CLI prompt behaviour is unchanged.
+    run_ingest(args.ticker, exchange=args.exchange, append=args.append,
+               assume_yes=args.yes)
 
 
 if __name__ == "__main__":
