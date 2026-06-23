@@ -1050,7 +1050,6 @@ def list_companies():
         print(f"   {row['n']:>4} chunks   {name}{tag}")
     print(bar)
     print("Pass the exact name above to --company (debates) or --audit (detail).")
-    client.close()
 
 
 def run_audit(company_arg):
@@ -1070,7 +1069,6 @@ def run_audit(company_arg):
         if avail:
             print(f"Companies currently in the collection: {', '.join(avail)}")
         print(bar)
-        client.close()
         return
 
     # In MongoDB the document and its metadata are a single record.
@@ -1146,7 +1144,6 @@ def run_audit(company_arg):
     print(f"   {mark(tenk)} SEC 10-K filing      : {'present' if tenk else 'missing'}")
     print(f"   {mark(risk)} SEC Risk Factors     : {'present' if risk else 'missing'}")
     print(bar)
-    client.close()
 
 
 # ==============================================================================
