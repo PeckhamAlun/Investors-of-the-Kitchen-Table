@@ -26,7 +26,6 @@ AGENTS_DIR    = os.path.join(ROOT_DIR, "agents")
 COMPANIES_DIR = os.path.join(ROOT_DIR, "companies")
 CHROMA_DIR    = os.path.join(ROOT_DIR, "chroma_db")
 OUTPUTS_DIR   = os.path.join(ROOT_DIR, "outputs")
-SCRIPTS_DIR   = os.path.join(ROOT_DIR, "scripts")
 
 # ==============================================================================
 # CHROMADB COLLECTION NAMING CONVENTION
@@ -130,7 +129,6 @@ N_RESULTS = 7
 
 CLAUDE_MODEL    = "claude-sonnet-4-6"
 MAX_TOKENS      = 3000
-EXPANSION_COUNT = 4
 
 # ==============================================================================
 # AGENT REGISTRY

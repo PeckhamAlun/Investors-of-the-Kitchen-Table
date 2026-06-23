@@ -8,16 +8,15 @@
   loads them into the shared `company_financials` MongoDB Atlas collection so
   the debate engine can cite real numbers.
 
-  This is the MongoDB/Gemini counterpart of scripts/analyse_company.py. It uses
-  the SAME data-pull, computed-metrics, trend-analysis and SEC-EDGAR logic, then
-  swaps only the embedding model (Gemini gemini-embedding-001, 3072-dim, instead
-  of all-MiniLM-L6-v2) and the store (MongoDB Atlas instead of ChromaDB).
-
   Data layers, all written as clean human-readable text chunks:
     1. yfinance financials — income / balance / cash-flow, one quarter per chunk
     2. yfinance metrics    — valuation/margin snapshot + analyst recommendations
     3. Computed metrics    — SBC %, FCF margin, YoY growth, gross-margin, Rule of 40
     4. SEC EDGAR           — last 4x 10-Q + 1x 10-K: MD&A, Risk Factors, Business
+
+  Writes to the MongoDB Atlas `company_financials` collection that main.py
+  reads from, embedding each chunk with Gemini (the same model/vector space the
+  debate engine queries against). Wipe-by-default; --append keeps existing data.
 
   USAGE
   -----
@@ -28,10 +27,11 @@
 
   DEPENDENCIES
   ------------
-    py -3.11 -m pip install yfinance google-genai pymongo
+    py -3.11 -m pip install yfinance pymongo google-genai
+    (pymongo + google-genai already present from main.py's Atlas migration)
 
-  No API key required for yfinance / SEC EDGAR (both free + keyless). Embedding
-  needs GOOGLE_API_KEY; storage needs MONGODB_URI (both from .env via config.py).
+  Requires MONGODB_URI and GOOGLE_API_KEY in .env (same as main.py). yfinance
+  and SEC EDGAR are free and keyless.
 
   NOTE ON COMPANY NAMING
   ----------------------
@@ -58,17 +58,16 @@ try:
 except Exception:
     pass
 
-# ── yfinance: ingest-only ────────────────────────────────────────────────────
-# Not needed by --audit or --list (those only read MongoDB), so we skip the
-# import in those modes — keeping them light. (No torch here: embeddings are now
-# remote via Gemini, so the old torch/yfinance DLL load-order dance is gone.)
+# ── yfinance: ingest-only ───────────────────────────────────────────────────
+# Needed only for the data pull. --audit and --list read MongoDB Atlas alone,
+# so we skip importing yfinance in those modes to keep them light.
 if not any(flag in sys.argv for flag in ("--audit", "--list")):
     try:
         import yfinance as yf
     except ImportError:
         sys.exit("ERROR: 'yfinance' is not installed.  Run:  py -3.11 -m pip install yfinance")
 
-# ── third-party (always needed: SEC uses requests; storage uses pymongo) ──
+# ── third-party (always needed: SEC uses requests; pymongo for all DB access) ──
 try:
     import requests
 except ImportError:
@@ -77,24 +76,37 @@ except ImportError:
 try:
     from pymongo.mongo_client import MongoClient
     from pymongo.server_api import ServerApi
+    from pymongo.mongo_client import MongoClient
+    from pymongo.server_api import ServerApi
 except ImportError:
     sys.exit("ERROR: 'pymongo' is not installed.  Run:  py -3.11 -m pip install pymongo")
+    sys.exit("ERROR: 'pymongo' is not installed.  Run:  py -3.11 -m pip install pymongo")
 
-# NOTE: google.genai is imported lazily inside ingest() so --audit/--list never
-# load it. They only read MongoDB.
+# NOTE: the Gemini client (google-genai) is imported lazily inside ingest() so
+# --audit and --list never load it — they only read MongoDB.
 
 # ── project config (single source of truth) ──
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
+    CHUNK_SIZE,
+    CHUNK_OVERLAP,
+    normalize_company,
     MONGODB_URI,
     MONGODB_DB_NAME,
     GEMINI_EMBED_MODEL,
     GOOGLE_API_KEY,
     MONGO_COMPANY_COLLECTION,
-    CHUNK_SIZE,
-    CHUNK_OVERLAP,
-    normalize_company,
 )
+
+# ── MongoDB Atlas connection (single client, reused across modes) ──
+_mongo_client = None
+
+def get_db():
+    """Return the Atlas database handle, opening the client on first use."""
+    global _mongo_client
+    if _mongo_client is None:
+        _mongo_client = MongoClient(MONGODB_URI, server_api=ServerApi("1"))
+    return _mongo_client[MONGODB_DB_NAME]
 
 # ==============================================================================
 # CONSTANTS
@@ -892,7 +904,7 @@ def pull_sec(name, ticker):
 
 
 # ==============================================================================
-# STEP 5 — MONGODB INGESTION  (Gemini embeddings)
+# STEP 5 — MONGODB ATLAS INGESTION
 # ==============================================================================
 
 def embed_texts(gemini_client, texts):
@@ -905,8 +917,8 @@ def embed_texts(gemini_client, texts):
 
 
 def ingest(chunks, company_key, ticker, exchange, append):
-    """Embed (Gemini) and load chunks into company_financials (MongoDB Atlas).
-    Returns (added, total)."""
+    """Embed each chunk with Gemini and load into the Atlas `company_financials`
+    collection (same schema/vector space main.py queries). Returns (added, total)."""
     if not chunks:
         print("\n  ERROR: no chunks were built — nothing to ingest.")
         sys.exit(1)
@@ -925,28 +937,13 @@ def ingest(chunks, company_key, ticker, exchange, append):
 
     iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    texts = [c["text"] for c in chunks]
-
-    print(f"\n  Loading embedding model: {GEMINI_EMBED_MODEL}")
-    gemini_client = genai.Client(api_key=GOOGLE_API_KEY)
-    print(f"  Embedding {len(texts):,} chunks (batches of {EMBED_BATCH_SIZE})...")
-
-    # ---- Batch embed (50 per call, 0.5s sleep between batches) ----
-    embeddings = []
-    for i in range(0, len(texts), EMBED_BATCH_SIZE):
-        j = min(i + EMBED_BATCH_SIZE, len(texts))
-        embeddings.extend(embed_texts(gemini_client, texts[i:j]))
-        print(f"  Embedded {j:,} / {len(texts):,} chunks")
-        if j < len(texts):
-            time.sleep(BATCH_SLEEP_SECS)
-
-    # ---- Build one MongoDB document per chunk ----
+    # Build documents — metadata stored inline, mirroring main.py's company schema.
     docs = []
     for n, c in enumerate(chunks):
+        safe = re.sub(r"[^a-zA-Z0-9]", "_", f"{ticker}_{c['source_type']}_{c.get('period','')}")[:60]
         docs.append({
-            "_id":         f"company_{ticker}_{c['source_type']}_{n}",
+            "_id":         f"{safe}_{n}",
             "text":        c["text"],
-            "embedding":   embeddings[n],
             "company":     company_key,
             "ticker":      ticker,
             "source":      c["source"],
@@ -956,61 +953,72 @@ def ingest(chunks, company_key, ticker, exchange, append):
             "ingested_at": iso,
         })
 
+    # Embed with Gemini — imported here so --audit / --list never load it.
+    from google import genai as google_genai
+
+    print(f"\n  Embedding model: {GEMINI_EMBED_MODEL}")
+    gemini_client = google_genai.Client(api_key=GOOGLE_API_KEY)
+    print(f"  Embedding {len(docs):,} chunks via Gemini...")
+    for i, d in enumerate(docs, 1):
+        result = gemini_client.models.embed_content(
+            model=GEMINI_EMBED_MODEL,
+            contents=d["text"],
+        )
+        d["embedding"] = list(result.embeddings[0].values)
+        if i % 10 == 0 or i == len(docs):
+            print(f"    embedded {i:,} / {len(docs):,}")
+
     print("  Connecting to MongoDB Atlas...")
-    client = MongoClient(MONGODB_URI, server_api=ServerApi('1'))
-    collection = client[MONGODB_DB_NAME][MONGO_COMPANY_COLLECTION]
+    col = get_db()[MONGO_COMPANY_COLLECTION]
 
     if not append:
-        existing = collection.count_documents({"company": company_key})
+        existing = col.count_documents({})
         if existing:
-            print(f"  Wiping existing '{company_key}' data ({existing:,} chunks)...")
-            collection.delete_many({"company": company_key})
+            print(f"  Wiping existing '{MONGO_COMPANY_COLLECTION}' collection ({existing:,} docs)...")
+            col.delete_many({})
     else:
-        existing = collection.count_documents({"company": company_key})
-        print(f"  Appending — {existing:,} chunks already stored for '{company_key}'.")
+        print(f"  Appending — {col.count_documents({}):,} docs already stored.")
 
-    BATCH = 100
-    for i in range(0, len(docs), BATCH):
-        j = min(i + BATCH, len(docs))
-        collection.insert_many(docs[i:j])
-        print(f"  Loaded {j:,} / {len(docs):,} chunks")
+    # Upsert by _id so a re-run overwrites rather than duplicates.
+    for n, d in enumerate(docs, 1):
+        col.replace_one({"_id": d["_id"]}, d, upsert=True)
+        if n % 25 == 0 or n == len(docs):
+            print(f"  Loaded {n:,} / {len(docs):,} chunks")
 
-    total = collection.count_documents({})
-    client.close()
-    return len(docs), total
+    return len(docs), col.count_documents({})
 
 
 # ==============================================================================
-# AUDIT — --audit <company>   (MongoDB)
+# AUDIT — --audit <company>   (reads MongoDB Atlas)
 # ==============================================================================
 
 def list_companies():
     """Print every distinct company key stored in company_financials, with counts.
-    Lets you confirm the exact name to pass to --company / --audit."""
-    from collections import Counter
+    Lets you confirm the exact name to pass to --company / --audit. Reads Atlas."""
     bar = "═" * 56
-
-    if not MONGODB_URI:
-        sys.exit("ERROR: MONGODB_URI is not set (.env). Cannot connect to MongoDB.")
-    client = MongoClient(MONGODB_URI, server_api=ServerApi('1'))
-    collection = client[MONGODB_DB_NAME][MONGO_COMPANY_COLLECTION]
+    col = get_db()[MONGO_COMPANY_COLLECTION]
 
     print(f"\n{bar}")
     print(f"COMPANIES IN '{MONGO_COMPANY_COLLECTION}'")
+    print(f"COMPANIES IN '{MONGO_COMPANY_COLLECTION}'")
     print(bar)
 
-    metas = list(collection.find({}, {"company": 1, "ticker": 1}))
-    if not metas:
+    if col.count_documents({}) == 0:
         print("(collection is empty — nothing ingested)")
         print(bar)
-        client.close()
         return
 
-    counts = Counter(m.get("company") for m in metas)
-    for name, n in sorted(counts.items(), key=lambda kv: (-kv[1], str(kv[0]))):
-        ticker = next((m.get("ticker") for m in metas if m.get("company") == name and m.get("ticker")), "")
+    rows = col.aggregate([
+        {"$group": {"_id": "$company",
+                    "n": {"$sum": 1},
+                    "tickers": {"$addToSet": "$ticker"}}},
+        {"$sort": {"n": -1, "_id": 1}},
+    ])
+    for row in rows:
+        name = row["_id"]
+        ticker = next((t for t in row.get("tickers", []) if t), "")
         tag = f"  ({ticker})" if ticker else ""
-        print(f"   {n:>4} chunks   {name}{tag}")
+        print(f"   {row['n']:>4} chunks   {name}{tag}")
     print(bar)
     print("Pass the exact name above to --company (debates) or --audit (detail).")
     client.close()
@@ -1020,26 +1028,24 @@ def run_audit(company_arg):
     company_key = normalize_company(company_arg)
     bar = "═" * 56
 
-    if not MONGODB_URI:
-        sys.exit("ERROR: MONGODB_URI is not set (.env). Cannot connect to MongoDB.")
-    client = MongoClient(MONGODB_URI, server_api=ServerApi('1'))
-    collection = client[MONGODB_DB_NAME][MONGO_COMPANY_COLLECTION]
-
-    metas = list(collection.find({"company": company_key}))
-    docs  = [m.get("text", "") for m in metas]
+    col = get_db()[MONGO_COMPANY_COLLECTION]
+    docs = list(col.find({"company": company_key}))
 
     print(f"\n{bar}")
     print(f"COMPANY FINANCIALS AUDIT — {company_arg}")
     print(bar)
 
-    if not metas:
-        avail = sorted({m.get("company") for m in collection.find({}, {"company": 1})})
+    if not docs:
+        avail = sorted(c for c in col.distinct("company") if c)
         print(f"No chunks found for '{company_key}'.")
         if avail:
-            print(f"Companies currently in the collection: {', '.join(a for a in avail if a)}")
+            print(f"Companies currently in the collection: {', '.join(avail)}")
         print(bar)
         client.close()
         return
+
+    # In MongoDB the document and its metadata are a single record.
+    metas = docs
 
     print(f"Total chunks : {len(metas)}\n")
 
@@ -1068,7 +1074,7 @@ def run_audit(company_arg):
         print(f"   ... (+{len(rows) - 15} more)")
 
     # sample: most recent ANNUAL summary, then most recent QUARTER (for comparison)
-    inc = [(m, d) for m, d in zip(metas, docs) if m.get("form_type") == "income_statement"]
+    inc = [(m, m.get("text", "")) for m in metas if m.get("form_type") == "income_statement"]
     annual_inc  = sorted([x for x in inc if "Annual" in (x[0].get("source") or "")],
                          key=lambda md: md[0].get("period", ""), reverse=True)
     quarter_inc = sorted([x for x in inc if "Annual" not in (x[0].get("source") or "")],
@@ -1130,7 +1136,7 @@ def main():
                         help="List every company stored in company_financials (and exit)")
     args = parser.parse_args()
 
-    # ── List mode: just show what's stored, then exit (no yfinance, no network) ──
+    # ── List mode: just show what's stored, then exit (reads MongoDB only) ──
     if args.list:
         list_companies()
         return
@@ -1219,6 +1225,7 @@ def main():
     print(f"   SEC filings         : {count('sec_filing'):>3} chunks")
     print("   ──────────────────────────────")
     print(f"   Total added         : {added:>3} chunks")
+    print(f"   Collection          : {MONGO_COMPANY_COLLECTION} ({total} total docs)")
     print(f"   Collection          : {MONGO_COMPANY_COLLECTION} ({total} total docs)")
     print(f"   Stored as           : company='{company_key}'  (use this with --company)")
     print(f"   Time taken          : {elapsed:.1f}s")
