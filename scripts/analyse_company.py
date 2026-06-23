@@ -95,7 +95,7 @@ from config import (
     MONGODB_DB_NAME,
     GEMINI_EMBED_MODEL,
     GOOGLE_API_KEY,
-    MONGO_COMPANY_COLLECTION,
+    COMPANY_COLLECTION,
 )
 
 # ── MongoDB Atlas connection (single client, reused across modes) ──
@@ -916,6 +916,23 @@ def embed_texts(gemini_client, texts):
     return [list(e.values) for e in result.embeddings]
 
 
+def get_latest_ingest_version(company_key):
+    """Return (ingested_at, ingest_version) for the most recent ingest of a
+    company — the row carrying the highest ingest_version. Returns (None, 0)
+    when the company has never been ingested, or its data predates versioning
+    (no ingest_version field). Reads MongoDB Atlas only; safe to import from
+    main.py for retrieval-time version pinning."""
+    col = get_db()[COMPANY_COLLECTION]
+    doc = col.find_one(
+        {"company": company_key, "ingest_version": {"$exists": True}},
+        sort=[("ingest_version", -1)],
+        projection={"ingest_version": 1, "ingested_at": 1, "_id": 0},
+    )
+    if not doc:
+        return None, 0
+    return doc.get("ingested_at"), doc.get("ingest_version", 0)
+
+
 def ingest(chunks, company_key, ticker, exchange, append):
     """Embed each chunk with Gemini and load into the Atlas `company_financials`
     collection (same schema/vector space main.py queries). Returns (added, total)."""
@@ -937,20 +954,29 @@ def ingest(chunks, company_key, ticker, exchange, append):
 
     iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
+    # Auto-incremented version: max existing ingest_version for this company + 1
+    # (1 on first ingest). History is preserved — main.py retrieves only the
+    # latest version.
+    _, prev_version = get_latest_ingest_version(company_key)
+    ingest_version  = prev_version + 1
+
     # Build documents — metadata stored inline, mirroring main.py's company schema.
+    # The _id is version-scoped so a re-ingest is stored ALONGSIDE prior versions
+    # (rather than overwriting them via the replace_one upsert below).
     docs = []
     for n, c in enumerate(chunks):
         safe = re.sub(r"[^a-zA-Z0-9]", "_", f"{ticker}_{c['source_type']}_{c.get('period','')}")[:60]
         docs.append({
-            "_id":         f"{safe}_{n}",
-            "text":        c["text"],
-            "company":     company_key,
-            "ticker":      ticker,
-            "source":      c["source"],
-            "source_type": c["source_type"],
-            "period":      c.get("period", "Unknown"),
-            "form_type":   c.get("form_type", "Unknown"),
-            "ingested_at": iso,
+            "_id":            f"{safe}_{n}_v{ingest_version}",
+            "text":           c["text"],
+            "company":        company_key,
+            "ticker":         ticker,
+            "source":         c["source"],
+            "source_type":    c["source_type"],
+            "period":         c.get("period", "Unknown"),
+            "form_type":      c.get("form_type", "Unknown"),
+            "ingested_at":    iso,
+            "ingest_version": ingest_version,
         })
 
     # Embed with Gemini — imported here so --audit / --list never load it.
@@ -969,17 +995,20 @@ def ingest(chunks, company_key, ticker, exchange, append):
             print(f"    embedded {i:,} / {len(docs):,}")
 
     print("  Connecting to MongoDB Atlas...")
-    col = get_db()[MONGO_COMPANY_COLLECTION]
+    col = get_db()[COMPANY_COLLECTION]
 
-    if not append:
-        existing = col.count_documents({})
-        if existing:
-            print(f"  Wiping existing '{MONGO_COMPANY_COLLECTION}' collection ({existing:,} docs)...")
-            col.delete_many({})
+    # Versioned ingest — never delete prior data. Older versions stay in the
+    # collection as history; the debate engine only retrieves the latest version.
+    # (--append is retained for CLI compatibility but no longer changes behaviour,
+    # since ingestion is now non-destructive by default.)
+    prior = col.count_documents({"company": company_key})
+    if prior:
+        print(f"  Preserving {prior:,} existing '{company_key}' chunk(s); writing as version {ingest_version}.")
     else:
-        print(f"  Appending — {col.count_documents({}):,} docs already stored.")
+        print(f"  First ingest for '{company_key}' — writing as version {ingest_version}.")
 
-    # Upsert by _id so a re-run overwrites rather than duplicates.
+    # Upsert by _id (version-scoped) so re-running the SAME version overwrites
+    # rather than duplicates, while a NEW version is added alongside the old.
     for n, d in enumerate(docs, 1):
         col.replace_one({"_id": d["_id"]}, d, upsert=True)
         if n % 25 == 0 or n == len(docs):
@@ -996,11 +1025,11 @@ def list_companies():
     """Print every distinct company key stored in company_financials, with counts.
     Lets you confirm the exact name to pass to --company / --audit. Reads Atlas."""
     bar = "═" * 56
-    col = get_db()[MONGO_COMPANY_COLLECTION]
+    col = get_db()[COMPANY_COLLECTION]
 
     print(f"\n{bar}")
-    print(f"COMPANIES IN '{MONGO_COMPANY_COLLECTION}'")
-    print(f"COMPANIES IN '{MONGO_COMPANY_COLLECTION}'")
+    print(f"COMPANIES IN '{COMPANY_COLLECTION}'")
+    print(f"COMPANIES IN '{COMPANY_COLLECTION}'")
     print(bar)
 
     if col.count_documents({}) == 0:
@@ -1028,7 +1057,7 @@ def run_audit(company_arg):
     company_key = normalize_company(company_arg)
     bar = "═" * 56
 
-    col = get_db()[MONGO_COMPANY_COLLECTION]
+    col = get_db()[COMPANY_COLLECTION]
     docs = list(col.find({"company": company_key}))
 
     print(f"\n{bar}")
@@ -1225,8 +1254,8 @@ def main():
     print(f"   SEC filings         : {count('sec_filing'):>3} chunks")
     print("   ──────────────────────────────")
     print(f"   Total added         : {added:>3} chunks")
-    print(f"   Collection          : {MONGO_COMPANY_COLLECTION} ({total} total docs)")
-    print(f"   Collection          : {MONGO_COMPANY_COLLECTION} ({total} total docs)")
+    print(f"   Collection          : {COMPANY_COLLECTION} ({total} total docs)")
+    print(f"   Collection          : {COMPANY_COLLECTION} ({total} total docs)")
     print(f"   Stored as           : company='{company_key}'  (use this with --company)")
     print(f"   Time taken          : {elapsed:.1f}s")
     print(bar)

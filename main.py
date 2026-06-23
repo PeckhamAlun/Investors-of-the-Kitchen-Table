@@ -43,9 +43,13 @@ from config import (
     system_prompt_path, OUTPUTS_DIR,
     AGENT_DISPLAY, AGENT_COLOURS, normalize_company,
     MONGODB_URI, MONGODB_DB_NAME, GEMINI_EMBED_MODEL,
-    GOOGLE_API_KEY, mongo_philosophy_collection,
-    MONGO_COMPANY_COLLECTION
+    GOOGLE_API_KEY,
 )
+
+# Latest-ingest lookup lives in the ingestion script. Importing it here lets
+# retrieval pin the company filter to the most recent ingest version only —
+# historical versions stay in the DB but agents never see stale data.
+from scripts.analyse_company import get_latest_ingest_version
 
 # ==============================================================================
 # DEBATE SETTINGS (defaults — all overridable via CLI)
@@ -143,50 +147,6 @@ def build_expansions(query: str, intent: str, company: str | None) -> list[str]:
         return [query, f"investment perspective on {query}", f"{company_str} {intent} analysis"]
 
 
-def build_focus_instruction(intent: str, company: str | None) -> str:
-    company_str = company.title() if company else "the company"
-    instructions = {
-        "financials": (
-            f"Focus strictly on {company_str}'s financial data: revenue, margins, "
-            f"cash flow, stock-based compensation, earnings quality, and valuation. "
-            f"Ground every claim in specific numbers from the financial data provided. "
-            f"Do not reference your personal history or past investments."
-        ),
-        "growth": (
-            f"Focus strictly on {company_str}'s growth trajectory: customer expansion, "
-            f"net revenue retention, TAM, product pipeline, and compounding dynamics. "
-            f"Use specific metrics from the data provided. "
-            f"Do not reference your personal history or past investments."
-        ),
-        "competitive": (
-            f"Focus strictly on {company_str}'s competitive position: moat durability, "
-            f"switching costs, market share, and specific competitive threats. "
-            f"Name the specific competitors and dynamics at play. "
-            f"Where relevant, tie in what was established about the financials earlier. "
-            f"Do not reference your personal history or past investments."
-        ),
-        "macro": (
-            f"Focus strictly on how the macro environment affects {company_str} specifically. "
-            f"Be concrete about the mechanisms. Where relevant, connect to the financial "
-            f"and competitive points already established in this session. "
-            f"Do not reference your personal history or past investments."
-        ),
-        "management": (
-            f"Focus strictly on {company_str}'s management quality, capital allocation, "
-            f"and strategic execution. Use specific decisions and data points. "
-            f"Connect to the financial and competitive context already established. "
-            f"Do not reference your personal history or past investments."
-        ),
-    }
-    return instructions.get(
-        intent,
-        f"Stay strictly on the topic and {company_str} at hand. "
-        f"Do not reference your personal history, past funds, or past investments. "
-        f"Apply your framework to this specific company using the data provided. "
-        f"Where relevant, build on what has already been established in this session."
-    )
-
-
 def generate_round_title(topic: str, client: anthropic.Anthropic) -> str:
     """Generate a short, clean section title from the topic string."""
     try:
@@ -217,13 +177,8 @@ gemini_client    = google_genai.Client(api_key=GOOGLE_API_KEY)
 anthropic_client = anthropic.Anthropic()
 
 
-def load_collection(name: str):
-    """Returns MongoDB collection — always exists (Atlas creates on first insert)."""
-    return db[name]
-
-
 def available_companies() -> list[str]:
-    col = db[MONGO_COMPANY_COLLECTION]
+    col = db[COMPANY_COLLECTION]
     return sorted(col.distinct("company"))
 
 
@@ -246,6 +201,17 @@ def retrieve_records(
     expansions = build_expansions(query, intent, company)
     comp_results_per_query = 3 if intent in ("financials", "growth") else 2
 
+    # Pin company retrieval to the LATEST ingest only — historical versions stay
+    # in the collection but agents never see stale data. Computed once per call.
+    # Falls back to a company-only filter for legacy data that has no
+    # ingest_version field (latest_version == 0).
+    company_filter = None
+    if company:
+        _, latest_version = get_latest_ingest_version(company)
+        company_filter = {"company": company}
+        if latest_version:
+            company_filter["ingest_version"] = latest_version
+
     seen_ids: set = set()
     records: list[dict] = []
 
@@ -258,7 +224,7 @@ def retrieve_records(
         embedding = list(result.embeddings[0].values)
 
         # Query philosophy collection
-        phil_col = db[mongo_philosophy_collection(agent)]
+        phil_col = db[philosophy_collection(agent)]
         phil_results = phil_col.aggregate([
             {
                 "$vectorSearch": {
@@ -293,7 +259,7 @@ def retrieve_records(
 
         # Query company financials
         if company:
-            comp_col = db[MONGO_COMPANY_COLLECTION]
+            comp_col = db[COMPANY_COLLECTION]
             comp_results = comp_col.aggregate([
                 {
                     "$vectorSearch": {
@@ -302,7 +268,7 @@ def retrieve_records(
                         "queryVector": embedding,
                         "numCandidates": 50,
                         "limit": comp_results_per_query,
-                        "filter": {"company": company}
+                        "filter": company_filter
                     }
                 },
                 {
@@ -504,7 +470,7 @@ def agent_node(state: DebateState) -> DebateState:
     other_names = " and ".join(display_name(a) for a in others)
 
     if not history:
-        user_message = f"""Topic for debate: {topic}
+        header = f"""Topic for debate: {topic}
         {f'Company under discussion: {company}' if company else ''}
 
         Relevant context from your research and knowledge base:
@@ -531,67 +497,14 @@ def agent_node(state: DebateState) -> DebateState:
         The portfolio manager reading this will verify your key points against
         the filings before making any decision. Your value is in the quality
         of the argument and the precision of what you flag as unresolved —
-        not in covering every possible angle.
-
-        CRITICAL: Read the full debate history before writing. Any point already made by another investor — even if you would frame it differently — must NOT be repeated. Skip it entirely and move to the next unaddressed angle. You will be penalised for restating what has already been said.
-
-        TEMPORAL REASONING — how to use financial data across time:
-
-        All quarters in the financial data are available to you and all of
-        them matter — they form the complete picture of how this business
-        has evolved. Do not ignore older data.
-
-        Apply this hierarchy when drawing conclusions:
-
-        1. TREND FIRST — before citing any individual quarter, establish the
-           direction of the business. Is revenue growth accelerating or
-           decelerating? Are margins expanding or compressing? Is FCF improving
-           as a percentage of revenue? The trend is more important than any
-           single data point.
-
-        2. TRAILING FOUR QUARTERS — this is your primary evidence base for
-           the current state of the business. Weight these most heavily when
-           making claims about where the company stands today.
-
-        3. INFLECTION QUARTERS — some older quarters matter more than others
-           because they represent a turning point. If a key metric changed
-           direction in a specific quarter — NRR dropped, margins expanded
-           suddenly, revenue growth reaccelerated — that quarter deserves
-           explicit mention as the inflection point, not just as historical data.
-           Example: "Gross margins compressed from 74% to 71% in Q2 2023 and
-           have not recovered — that compression predates the AI infrastructure
-           thesis and raises questions about structural pricing power."
-
-        4. OLDER DATA AS CONTEXT — quarters beyond the trailing twelve months
-           should be used to establish the baseline the business grew from, or
-           to identify whether a current trend is a reversion to historical
-           norms or genuinely new behaviour. Never cite an old quarter as
-           equivalent evidence to a recent one without explaining why it is
-           specifically meaningful.
-
-        If pre-computed trend summaries are available in your retrieved context
-        (labelled as TREND ANALYSIS or INFLECTION FLAGS), treat those as
-        authoritative — they were computed directly from the raw financial data.
-
-        If the data does not contain a clear inflection point, say so explicitly
-        rather than treating all quarters as equally weighted.
-
-        FORMAT RULES — follow exactly:
-        1. One conviction sentence — your position, stated plainly
-        2. Bullet points — MAXIMUM 5 bullets per turn. Pick your 3-5 sharpest, most specific observations only. If you have more than 5 points, save them for your next turn. Each bullet maximum 20 words. One observation per bullet. No sub-clauses.
-        3. If one bullet point is insufficient to cover the point being made, have another bullet point that continues the thought, rather than trying to cram it all into one bullet with conjunctions. This forces clarity and precision in each point.
-        4. "Go verify" section — list each verification question on its own line,
-           prefixed with "- ". Maximum 3 questions. Each must be specific and
-           answerable from filings or product data. Format exactly like this:
-           Go verify:
-           - What is SBC as % of revenue for the trailing four quarters?
-           - What is net revenue retention rate — has it crossed below 115%?
+        not in covering every possible angle."""
+        footer = """
 
         If you agree with a point already made, do not restate it. Deepen it or advance to the next unresolved question, tackle more vital information to move forward.
 
         No long paragraphs. No analogies. No biography. If you can't say it in a bullet, it's not sharp enough yet."""
     else:
-        user_message = f"""Topic: {topic}
+        header = f"""Topic: {topic}
         {f'Company: {company}' if company else ''}
 
         Full session history — all prior rounds and arguments:
@@ -600,7 +513,15 @@ def agent_node(state: DebateState) -> DebateState:
         Relevant context from your research:
         {context if context else '[No specific context retrieved — draw on your frameworks]'}
 
-        Respond to the arguments made so far by {other_names}. You may challenge a specific point, build on an argument, introduce a new angle, or connect this topic to what was already established in earlier rounds.
+        Respond to the arguments made so far by {other_names}. You may challenge a specific point, build on an argument, introduce a new angle, or connect this topic to what was already established in earlier rounds."""
+        footer = """
+
+        If you agree with a point already made, do not restate it. Deepen it or advance to the next unresolved question.
+
+        No long paragraphs. Little analogies. No biography. If you can't say it in a bullet, it's not sharp enough yet."""
+
+    # Shared sections — identical for the opening turn and every later turn.
+    shared = """
 
         CRITICAL: Read the full debate history before writing. Any point already made by another investor — even if you would frame it differently — must NOT be repeated. Skip it entirely and move to the next unaddressed angle. You will be penalised for restating what has already been said.
 
@@ -654,11 +575,9 @@ def agent_node(state: DebateState) -> DebateState:
            answerable from filings or product data. Format exactly like this:
            Go verify:
            - What is SBC as % of revenue for the trailing four quarters?
-           - What is net revenue retention rate — has it crossed below 115%?
+           - What is net revenue retention rate — has it crossed below 115%?"""
 
-        If you agree with a point already made, do not restate it. Deepen it or advance to the next unresolved question.
-
-        No long paragraphs. Little analogies. No biography. If you can't say it in a bullet, it's not sharp enough yet."""
+    user_message = header + shared + footer
 
     import time
 
@@ -878,9 +797,15 @@ def _financial_snapshot_data(company: str | None) -> dict | None:
     the PDF simply skips the page rather than crashing."""
     if not company:
         return None
-    col = db[MONGO_COMPANY_COLLECTION]
+    col = db[COMPANY_COLLECTION]
+    # Latest ingest only — match the retrieval filter so the PDF snapshot and the
+    # debate cite the same (most recent) data; older versions remain as history.
+    _, latest_version = get_latest_ingest_version(company)
+    snap_filter = {"company": company}
+    if latest_version:
+        snap_filter["ingest_version"] = latest_version
     try:
-        docs = list(col.find({"company": company}))
+        docs = list(col.find(snap_filter))
     except Exception:
         return None
 
@@ -1349,10 +1274,6 @@ Examples:
     for agent in agents:
         if not os.path.exists(system_prompt_path(agent)):
             print(f"\n  ERROR: Missing system prompt for {agent}")
-            sys.exit(1)
-        if load_collection(philosophy_collection(agent)) is None:
-            print(f"\n  ERROR: No philosophy collection for {agent}")
-            print(f"  Run: py -3.11 scripts/ingest_philosophy.py --agent {agent}")
             sys.exit(1)
 
     # ── Validate company exists in the database ──

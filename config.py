@@ -94,14 +94,6 @@ GEMINI_EMBED_DIMS   = 3072
 GOOGLE_API_KEY      = os.getenv("GOOGLE_API_KEY")
 
 # ==============================================================================
-# MONGODB COLLECTION NAMING — mirrors ChromaDB convention exactly
-# ==============================================================================
-def mongo_philosophy_collection(agent_name: str) -> str:
-    return f"{agent_name.lower().replace(' ', '_')}_philosophy"
-
-MONGO_COMPANY_COLLECTION = "company_financials"
-
-# ==============================================================================
 # CHUNKING SETTINGS
 # ==============================================================================
 
