@@ -18,7 +18,6 @@ pypdf                 # scripts/split_memo_collection.py
 requests
 python-dateutil
 pymongo               # analyse_company.py stores company_financials in MongoDB
-yfinance              # analyse_company.py pulls financials
 
 # --- YouTube ingest (ingest_youtube.py, pull_transcripts.py, youtube_processor.py) ---
 yt-dlp

@@ -43,7 +43,7 @@ from config import (
     system_prompt_path, OUTPUTS_DIR,
     AGENT_DISPLAY, AGENT_COLOURS, normalize_company,
     MONGODB_URI, MONGODB_DB_NAME, GEMINI_EMBED_MODEL,
-    GOOGLE_API_KEY,
+    GOOGLE_API_KEY, ANTHROPIC_API_KEY,
 )
 
 # Latest-ingest lookup lives in the ingestion script. Importing it here lets
@@ -174,7 +174,7 @@ print("\n  Initialising Kitchen Table...")
 mongo_client     = MongoClient(MONGODB_URI, server_api=ServerApi('1'))
 db               = mongo_client[MONGODB_DB_NAME]
 gemini_client    = google_genai.Client(api_key=GOOGLE_API_KEY)
-anthropic_client = anthropic.Anthropic()
+anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 
 def available_companies() -> list[str]:

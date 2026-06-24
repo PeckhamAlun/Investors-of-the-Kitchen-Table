@@ -94,6 +94,12 @@ GEMINI_EMBED_DIMS   = 3072
 GOOGLE_API_KEY      = os.getenv("GOOGLE_API_KEY")
 
 # ==============================================================================
+# FMP (FINANCIAL MODELING PREP) SETTINGS
+# Used by scripts/analyse_company.py to pull earnings-call transcripts.
+# ==============================================================================
+FMP_API_KEY = os.getenv("FMP_API_KEY", "")
+
+# ==============================================================================
 # CHUNKING SETTINGS
 # ==============================================================================
 
@@ -121,6 +127,7 @@ N_RESULTS = 7
 
 CLAUDE_MODEL    = "claude-sonnet-4-6"
 MAX_TOKENS      = 3000
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY_DEBATE", "") or os.getenv("ANTHROPIC_API_KEY", "")
 
 # ==============================================================================
 # AGENT REGISTRY
