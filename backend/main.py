@@ -556,9 +556,11 @@ class DebateRequest(BaseModel):
     ticker: str
     company: str
     agents: list[str] = ["buffett", "cathie_wood", "peter_lynch", "howard_marks", "ray_dalio"]
-    turns: int = 2
+    turns: int = 1
     topic: str = ""
     session_id: str = ""
+    session_history: list[dict] = []
+    round_num: int = 1
 
 
 @app.post("/debate/start")
@@ -606,27 +608,43 @@ async def start_debate(req: DebateRequest):
                 company=company_key,
                 agents=req.agents,
                 turns=req.turns,
-                round_num=1,
-                session_history=[],
+                round_num=req.round_num,
+                session_history=req.session_history,
                 audit=False,
             ):
                 yield f"data: {json.dumps(event)}\n\n"
 
                 if event.get("type") == "round_complete":
                     db = get_mongo_db()
-                    debate_doc = {
-                        "_id": session_id,
-                        "session_id": session_id,
-                        "ticker": req.ticker.upper(),
-                        "company": company_key,
-                        "topic": topic,
-                        "agents": req.agents,
-                        "turns": req.turns,
-                        "history": event.get("history", []),
-                        "created_at": datetime.now(timezone.utc).isoformat(),
-                        "rounds": 1,
-                    }
-                    db["debates"].replace_one({"_id": session_id}, debate_doc, upsert=True)
+                    # If this session already exists, append the new round's
+                    # history; otherwise create the document for round 1.
+                    existing = db["debates"].find_one({"session_id": session_id})
+                    if existing:
+                        combined_history = existing.get("history", []) + event["history"]
+                        db["debates"].update_one(
+                            {"session_id": session_id},
+                            {"$set": {
+                                "history": combined_history,
+                                "rounds": existing.get("rounds", 1) + 1,
+                                "updated_at": datetime.now(timezone.utc).isoformat()
+                            }}
+                        )
+                    else:
+                        debate_doc = {
+                            "_id": session_id,
+                            "session_id": session_id,
+                            "ticker": req.ticker.upper(),
+                            "company": company_key,
+                            "topic": req.topic,
+                            "agents": req.agents,
+                            "turns": req.turns,
+                            "history": event["history"],
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                            "rounds": 1,
+                        }
+                        db["debates"].replace_one(
+                            {"_id": session_id}, debate_doc, upsert=True
+                        )
 
             # Generator exhausted — emit the final complete event.
             yield f"data: {json.dumps({'type': 'complete', 'session_id': session_id})}\n\n"

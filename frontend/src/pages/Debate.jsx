@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 
 // Debate.jsx — /debate/:ticker. Two phases:
@@ -45,6 +45,21 @@ function initials(name) {
   const parts = String(name).trim().split(/\s+/).filter(Boolean);
   const ii = (parts[0]?.[0] ?? "") + (parts[1]?.[0] ?? "");
   return ii.toUpperCase() || "?";
+}
+
+// Explicit monogram per agent id for the turn-card avatars; falls back to a
+// name-derived monogram for any agent id not listed here.
+const AGENT_INITIALS = {
+  buffett: "WB",
+  cathie_wood: "CW",
+  peter_lynch: "PL",
+  howard_marks: "HM",
+  ray_dalio: "RD",
+  synthesis: "S",
+};
+
+function agentInitials(agentId, name) {
+  return AGENT_INITIALS[agentId] || initials(name);
 }
 
 // Setup-screen roster — id / display name / initials (WB, CW, PL, HM, RD).
@@ -104,11 +119,15 @@ function renderResponse(text, showCursor) {
 
     if (isBullet) {
       const content = trimmed.slice(2);
-      const tone = inGoVerify ? "italic text-tikt-green/50" : "text-tikt-green";
+      // Go-verify bullets stay smaller and muted; regular bullets take the
+      // larger body size with more generous line height.
+      const cls = inGoVerify
+        ? "mt-1 flex gap-2 text-[13px] leading-[1.6] italic text-tikt-green/50"
+        : "mt-1 flex gap-2 text-[15px] leading-7 text-tikt-green";
       return (
         <div
           key={idx}
-          className={`mt-1 flex gap-2 text-[13px] leading-[1.6] ${tone}`}
+          className={cls}
         >
           <span className="text-tikt-gold">•</span>
           <span>
@@ -130,7 +149,7 @@ function renderResponse(text, showCursor) {
     // A normal paragraph line ends any open Go-verify block.
     inGoVerify = false;
     return (
-      <p key={idx} className="mt-2 text-[13px] leading-[1.6] text-tikt-green">
+      <p key={idx} className="mt-2 text-[15px] leading-7 text-tikt-green">
         {line}
         {cursor}
       </p>
@@ -159,6 +178,11 @@ export default function Debate() {
   const [sessionId, setSessionId] = useState(null);
   const [error, setError] = useState(null);
 
+  // ── follow-up / multi-round state ──────────────────────────────────────
+  const [followUpTopic, setFollowUpTopic] = useState("");
+  const [roundNum, setRoundNum] = useState(1);
+  const [allHistory, setAllHistory] = useState([]);
+
   const endRef = useRef(null);
   const controllerRef = useRef(null);
 
@@ -169,20 +193,24 @@ export default function Debate() {
         : DEFAULT_AGENTS.filter((x) => x === id || prev.includes(x))
     );
 
-  // Kick off the debate when the user clicks Start: POST the chosen config and
-  // read the streaming response line by line, dispatching each parsed SSE event.
-  const startDebate = async () => {
-    if (selectedAgents.length === 0 || !topic.trim()) return;
+  // Shared streaming routine: POST a debate config and read the SSE response
+  // line by line, dispatching each parsed event. `continuation` keeps the
+  // existing transcript (a follow-up round) instead of starting fresh.
+  const runStream = async (payload, { continuation }) => {
     if (controllerRef.current) return; // a stream is already in flight
 
     const controller = new AbortController();
     controllerRef.current = controller;
 
-    // Reset transcript state and move into the debate view.
-    setTurns([]);
-    setIngestSteps([]);
-    setSessionId(null);
     setError(null);
+    if (!continuation) {
+      // Fresh transcript for a brand-new debate.
+      setTurns([]);
+      setIngestSteps([]);
+      setSessionId(null);
+    }
+    // Follow-up rounds keep prior turns; the render logic draws the round
+    // divider automatically once the new round's first turn streams in.
     setStatus("running");
 
     const handle = (evt) => {
@@ -259,7 +287,10 @@ export default function Debate() {
           });
           break;
         case "round_complete":
-          // No action — the backend persists the finished round to MongoDB.
+          // Keep the running history so a follow-up round can pass it back as
+          // session_history; the backend also persists it to MongoDB.
+          setAllHistory(evt.history);
+          setRoundNum((prev) => prev + 1);
           break;
         case "complete":
           setStatus("complete");
@@ -277,13 +308,7 @@ export default function Debate() {
       const response = await fetch(`${API}/debate/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ticker: symbol,
-          company,
-          agents: selectedAgents,
-          turns: turnsPerAgent,
-          topic,
-        }),
+        body: JSON.stringify(payload),
         signal: controller.signal,
       });
 
@@ -325,6 +350,42 @@ export default function Debate() {
     } finally {
       if (controllerRef.current === controller) controllerRef.current = null;
     }
+  };
+
+  // Initial round — fresh transcript.
+  const startDebate = () => {
+    if (selectedAgents.length === 0 || !topic.trim()) return;
+    runStream(
+      {
+        ticker: symbol,
+        company,
+        agents: selectedAgents,
+        turns: turnsPerAgent,
+        topic,
+      },
+      { continuation: false }
+    );
+  };
+
+  // Follow-up round — append to the existing transcript, passing prior history
+  // so the engine can continue from where the debate left off.
+  const continueDebate = () => {
+    if (!followUpTopic.trim()) return;
+    const followUp = followUpTopic;
+    setFollowUpTopic("");
+    runStream(
+      {
+        ticker: symbol,
+        company,
+        agents: selectedAgents,
+        turns: turnsPerAgent,
+        topic: followUp,
+        session_id: sessionId,
+        session_history: allHistory,
+        round_num: roundNum,
+      },
+      { continuation: true }
+    );
   };
 
   // Abort any in-flight stream on unmount. (No auto-start — the debate begins
@@ -519,8 +580,8 @@ export default function Debate() {
   return (
     <div className="flex min-h-0 w-full flex-1 overflow-hidden bg-tikt-cream font-inter text-tikt-green">
       {/* ───────────── LEFT: TRANSCRIPT (70%) ───────────── */}
-      <main className="w-[70%] overflow-y-auto">
-        <div className="mx-auto w-full max-w-[760px] px-10 pb-24 pt-8">
+      <main className="flex-1 overflow-y-auto">
+        <div className="w-full max-w-none px-12 pb-24 pt-8">
           {/* back */}
           <button
             type="button"
@@ -531,10 +592,10 @@ export default function Debate() {
           </button>
 
           {/* header */}
-          <div className="text-[11px] font-semibold uppercase tracking-[2px] text-tikt-gold">
+          <div className="text-[14px] font-semibold uppercase tracking-[2px] text-tikt-gold">
             {symbol} · Debate
           </div>
-          <h1 className="mt-1.5 font-display text-[28px] font-bold leading-tight text-tikt-green">
+          <h1 className="mt-1.5 font-display text-[36px] font-bold leading-tight text-tikt-green">
             {topic}
           </h1>
 
@@ -555,49 +616,101 @@ export default function Debate() {
 
           {/* turns — render one by one as they stream in, token by token */}
           <div className="mt-8 flex flex-col">
-            {turns.map((t, i) => {
-              // System / ingest-progress turns render as a centered status card.
-              if (t.isSystem) {
-                return (
-                  <div key={i} className="my-4 flex justify-center">
-                    <div className="flex items-center gap-2.5 rounded-lg border-[0.5px] border-tikt-gold bg-tikt-green/[0.03] px-5 py-3">
-                      {t.complete ? (
-                        <span className="text-[13px] font-semibold text-tikt-pos">
-                          ✓
-                        </span>
-                      ) : (
-                        <span className="h-2 w-2 animate-pulse rounded-full bg-tikt-gold" />
-                      )}
-                      <span className="text-[13px] italic text-tikt-green">
-                        {t.response}
-                      </span>
-                    </div>
-                  </div>
-                );
-              }
+            {(() => {
+              // Round tracking: the first non-synthesis turn that follows a
+              // synthesis opens a new round, so we render a "Round n" divider
+              // before it. Recomputed from scratch on every render (deterministic).
+              let roundNo = 1;
+              let sawSynthesis = false;
 
-              const isSynthesis = t.agent === "synthesis";
-              const name = t.display_name || displayName(t.agent);
-              return (
-                <div
-                  key={i}
-                  className={`py-6 ${
-                    i > 0 ? "border-t-[0.5px] border-tikt-green/15" : ""
-                  }`}
-                >
-                  <div
-                    className={`text-[14px] font-bold ${
-                      isSynthesis ? "italic text-tikt-green" : "text-tikt-gold"
-                    }`}
-                  >
-                    {isSynthesis ? "ANALYST SYNTHESIS" : name}
-                  </div>
-                  <div className="mt-1">
-                    {renderResponse(t.response, !t.complete)}
-                  </div>
-                </div>
-              );
-            })}
+              return turns.map((t, i) => {
+                // System / ingest-progress turns render as a centered status card.
+                if (t.isSystem) {
+                  return (
+                    <div key={i} className="my-4 flex justify-center">
+                      <div className="flex items-center gap-2.5 rounded-lg border-[0.5px] border-tikt-gold bg-tikt-green/[0.03] px-5 py-3">
+                        {t.complete ? (
+                          <span className="text-[13px] font-semibold text-tikt-pos">
+                            ✓
+                          </span>
+                        ) : (
+                          <span className="h-2 w-2 animate-pulse rounded-full bg-tikt-gold" />
+                        )}
+                        <span className="text-[13px] italic text-tikt-green">
+                          {t.response}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                }
+
+                const isSynthesis = t.agent === "synthesis";
+                const name = t.display_name || displayName(t.agent);
+                const mono = agentInitials(t.agent, name);
+
+                // A non-synthesis turn after a synthesis begins a new round.
+                let divider = null;
+                if (!isSynthesis && sawSynthesis) {
+                  roundNo += 1;
+                  sawSynthesis = false;
+                  divider = (
+                    <div className="my-4 flex items-center gap-4">
+                      <div className="h-px flex-1 bg-tikt-green/15" />
+                      <span className="text-[11px] font-semibold uppercase tracking-[2px] text-tikt-gold">
+                        Round {roundNo}
+                      </span>
+                      <div className="h-px flex-1 bg-tikt-green/15" />
+                    </div>
+                  );
+                }
+                if (isSynthesis) sawSynthesis = true;
+
+                return (
+                  <Fragment key={i}>
+                    {divider}
+                    <div
+                      className={`mb-6 flex gap-5 rounded-xl border border-tikt-green/15 p-6 ${
+                        t.complete ? "bg-white" : "bg-tikt-gold/[0.03]"
+                      } ${
+                        isSynthesis ? "border-l-[3px] border-l-tikt-gold" : ""
+                      }`}
+                    >
+                      {/* left column — avatar (80px fixed) */}
+                      <div className="flex w-20 flex-shrink-0 flex-col items-center">
+                        <span
+                          className={`flex h-16 w-16 items-center justify-center rounded-full text-[18px] font-bold ${
+                            isSynthesis
+                              ? "bg-tikt-green text-tikt-cream"
+                              : "bg-tikt-gold text-tikt-green"
+                          }`}
+                        >
+                          {mono}
+                        </span>
+                        <span className="mt-2 text-center text-[11px] leading-tight tracking-[1px] text-tikt-green/50">
+                          {isSynthesis ? "SYNTHESIS" : name}
+                        </span>
+                      </div>
+
+                      {/* right column — name + response */}
+                      <div className="flex-1">
+                        <div
+                          className={`text-[14px] font-bold ${
+                            isSynthesis
+                              ? "italic text-tikt-green"
+                              : "text-tikt-gold"
+                          }`}
+                        >
+                          {isSynthesis ? "ANALYST SYNTHESIS" : name}
+                        </div>
+                        <div className="mt-1">
+                          {renderResponse(t.response, !t.complete)}
+                        </div>
+                      </div>
+                    </div>
+                  </Fragment>
+                );
+              });
+            })()}
           </div>
 
           {/* complete banner */}
@@ -607,13 +720,41 @@ export default function Debate() {
             </div>
           )}
 
+          {/* follow-up — ask another question to continue the debate */}
+          {status === "complete" && (
+            <div className="mt-6 rounded-lg border-[1.5px] border-tikt-gold bg-white p-5">
+              <label
+                htmlFor="follow-up"
+                className="text-[11px] font-semibold uppercase tracking-[1.5px] text-tikt-gold"
+              >
+                Ask a Follow-up
+              </label>
+              <textarea
+                id="follow-up"
+                rows={2}
+                value={followUpTopic}
+                onChange={(e) => setFollowUpTopic(e.target.value)}
+                placeholder="What else should they debate?"
+                className="mt-2 w-full resize-none rounded-lg border-[0.5px] border-tikt-green/15 bg-white px-4 py-3 text-[13px] leading-[1.6] text-tikt-green outline-none placeholder:text-tikt-green/40 focus:border-tikt-green"
+              />
+              <button
+                type="button"
+                onClick={continueDebate}
+                disabled={!followUpTopic.trim()}
+                className="mt-3 w-full rounded-none bg-tikt-green px-5 py-3 text-[14px] font-semibold tracking-[0.3px] text-tikt-cream hover:bg-tikt-greenDark disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Continue Debate →
+              </button>
+            </div>
+          )}
+
           {/* scroll sentinel */}
           <div ref={endRef} />
         </div>
       </main>
 
       {/* ───────────── RIGHT: SESSION SIDEBAR (30%, sticky) ───────────── */}
-      <aside className="w-[30%] flex-shrink-0 overflow-y-auto border-l-[0.5px] border-tikt-green/15 bg-white/40">
+      <aside className="w-[280px] flex-shrink-0 overflow-y-auto border-l-[0.5px] border-tikt-green/15 bg-white/40">
         <div className="sticky top-0 p-6">
           {/* status indicator */}
           <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[1.5px]">
