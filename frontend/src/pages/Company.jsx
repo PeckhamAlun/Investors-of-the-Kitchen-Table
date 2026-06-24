@@ -237,6 +237,22 @@ export default function Company() {
                   </div>
                   <button
                     type="button"
+                    onClick={() =>
+                      navigate(`/debate/${symbol}`, {
+                        state: {
+                          company: profile?.name || symbol,
+                          topic: `Is ${profile?.name || symbol} a good investment?`,
+                          agents: [
+                            "buffett",
+                            "cathie_wood",
+                            "peter_lynch",
+                            "howard_marks",
+                            "ray_dalio",
+                          ],
+                          turns: 2,
+                        },
+                      })
+                    }
                     className="rounded-none bg-tikt-green px-5 py-2.5 text-[13px] font-semibold tracking-[0.3px] text-tikt-cream hover:bg-tikt-greenDark"
                   >
                     Start Debate →
@@ -459,6 +475,22 @@ export default function Company() {
                   <div className="flex md:w-[240px] md:flex-shrink-0">
                     <button
                       type="button"
+                      onClick={() =>
+                        navigate(`/debate/${symbol}`, {
+                          state: {
+                            company: profile?.name || symbol,
+                            topic: `Is ${profile?.name || symbol} a good investment?`,
+                            agents: [
+                              "buffett",
+                              "cathie_wood",
+                              "peter_lynch",
+                              "howard_marks",
+                              "ray_dalio",
+                            ],
+                            turns: 2,
+                          },
+                        })
+                      }
                       className="h-full w-full rounded-none bg-tikt-green px-5 py-4 text-[14px] font-semibold tracking-[0.3px] text-tikt-cream hover:bg-tikt-greenDark"
                     >
                       Start Debate on {symbol} →

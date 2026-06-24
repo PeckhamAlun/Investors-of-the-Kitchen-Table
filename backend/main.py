@@ -11,15 +11,64 @@ result back to the frontend.
 """
 
 import os
+import sys
 import time
+import json
+import uuid
+import asyncio
 
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from datetime import datetime, timezone
+from pymongo.mongo_client import MongoClient
+from pymongo.server_api import ServerApi
 
 load_dotenv(dotenv_path="../.env")
 FMP_API_KEY = os.getenv("FMP_API_KEY", "")
+
+MONGODB_URI = os.getenv("MONGODB_URI", "")
+_mongo_client = None
+
+
+def get_mongo_db():
+    global _mongo_client
+    if _mongo_client is None:
+        _mongo_client = MongoClient(MONGODB_URI, server_api=ServerApi("1"))
+    return _mongo_client[os.getenv("MONGODB_DB_NAME", "kitchen_table")]
+
+
+def get_company_key_by_ticker(ticker: str) -> str | None:
+    # The stored company key is always exact, so resolving it by ticker is far
+    # more reliable than normalizing the FMP display name (e.g. "MongoDB, Inc.").
+    db = get_mongo_db()
+    col = db["company_financials"]
+    doc = col.find_one(
+        {"ticker": ticker.upper()},
+        {"company": 1, "_id": 0}
+    )
+    return doc.get("company") if doc else None
+
+
+def _load_debate_engine():
+    # The project-root debate engine is ALSO named main.py, so a plain
+    # `import main` resolves to THIS backend module (loaded as "main" by uvicorn),
+    # not the engine. Load the root file once under a distinct module name.
+    if "debate_engine" in sys.modules:
+        return sys.modules["debate_engine"]
+    import importlib.util
+
+    root_main = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py"
+    )
+    spec = importlib.util.spec_from_file_location("debate_engine", root_main)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["debate_engine"] = module
+    spec.loader.exec_module(module)
+    return module
 
 # Simple in-memory response cache (per-process). Keyed by endpoint + ticker; each
 # value is a (data, timestamp) tuple. Cuts repeat calls to the FMP API on reload.
@@ -75,8 +124,65 @@ def health():
 
 
 @app.get("/market-data")
-def market_data():
-    return MARKET_DATA
+async def market_data():
+    key = "market_data"
+    cached = cache_get(key, HISTORY_TTL)
+    if cached is not None:
+        return cached
+
+    symbols = ["^GSPC", "^IXIC", "^FTSE", "^N225",
+               "^GDAXI", "^HSI", "^VIX", "^TNX"]
+    names = {
+        "^GSPC": "S&P 500",
+        "^IXIC": "NASDAQ",
+        "^FTSE": "FTSE 100",
+        "^N225": "Nikkei 225",
+        "^GDAXI": "DAX",
+        "^HSI": "Hang Seng",
+        "^VIX": "VIX",
+        "^TNX": "10Y Treasury",
+    }
+
+    base = "https://financialmodelingprep.com/stable"
+
+    async def fetch_one(client, sym):
+        name = names[sym]
+        fallback = {"name": name, "symbol": sym, "price": "—",
+                    "change": "—", "change_pct": "", "positive": True}
+        try:
+            # FMP needs the caret URL-encoded (^GSPC -> %5EGSPC).
+            fmp_sym = sym.replace("^", "%5E")
+            resp = await client.get(
+                f"{base}/quote?symbol={fmp_sym}&apikey={FMP_API_KEY}", timeout=10
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if not data:
+                return fallback
+            q = data[0]
+            price = q.get("price")
+            change = q.get("change")
+            change_pct = q.get("changePercentage")
+            if price is None or change is None or change_pct is None:
+                return fallback
+            # TNX is a yield, quoted to 3 decimals; everything else to 2.
+            dp = 3 if sym == "^TNX" else 2
+            return {
+                "name": name,
+                "symbol": sym,
+                "price": f"{price:,.{dp}f}",
+                "change": f"{'+' if change >= 0 else '-'}{abs(change):,.{dp}f}",
+                "change_pct": f"{'+' if change_pct >= 0 else '-'}{abs(change_pct):.2f}%",
+                "positive": change >= 0,
+            }
+        except Exception:
+            return fallback
+
+    async with httpx.AsyncClient() as client:
+        results = list(await asyncio.gather(*[fetch_one(client, s) for s in symbols]))
+
+    cache_set(key, results)
+    return results
 
 
 @app.get("/search")
@@ -446,6 +552,114 @@ async def company_financials(ticker: str):
     return result
 
 
-@app.post("/debate")
-def debate():
-    return {"message": "not implemented"}
+class DebateRequest(BaseModel):
+    ticker: str
+    company: str
+    agents: list[str] = ["buffett", "cathie_wood", "peter_lynch", "howard_marks", "ray_dalio"]
+    turns: int = 2
+    topic: str = ""
+    session_id: str = ""
+
+
+@app.post("/debate/start")
+async def start_debate(req: DebateRequest):
+    async def event_stream():
+        try:
+            # Load the project-root debate engine under a distinct module name so
+            # it doesn't clash with this backend's own `main` module. It also
+            # re-exports normalize_company / get_latest_ingest_version (imported
+            # into its namespace), so we pull everything from it and never mutate
+            # sys.path here — which would shadow `main` and break `uvicorn main:app`.
+            engine = _load_debate_engine()
+            normalize_company = engine.normalize_company
+            get_latest_ingest_version = engine.get_latest_ingest_version
+
+            session_id = req.session_id or str(uuid.uuid4())
+            # Resolve the company key by ticker — the stored key is always exact.
+            company_key = get_company_key_by_ticker(req.ticker)
+            if not company_key:
+                # Not ingested yet — derive a key from the display name as a
+                # fallback. It gets set properly during the ingest step anyway.
+                import re
+
+                clean = re.sub(
+                    r",?\s+(inc\.?|incorporated|corp\.?|corporation|co\.?|ltd\.?|plc|holdings|group)\b",
+                    "", req.company, flags=re.IGNORECASE
+                ).strip().rstrip(".,").strip()
+                company_key = normalize_company(clean)
+            topic = req.topic or f"Is {req.ticker} a good investment?"
+
+            # Check if company is ingested
+            _, version = get_latest_ingest_version(company_key)
+            if version == 0:
+                yield f"data: {json.dumps({'type': 'error', 'message': f'Company {req.company} not ingested. Please ingest first.'})}\n\n"
+                return
+
+            # Emit session start
+            yield f"data: {json.dumps({'type': 'session_start', 'session_id': session_id, 'topic': topic, 'company': company_key, 'agents': req.agents})}\n\n"
+
+            # Stream the debate token-by-token straight from the engine. Each event
+            # is piped to the SSE stream verbatim. On round_complete we persist the
+            # finished round to MongoDB (exactly as before), then keep streaming.
+            async for event in engine.stream_debate_round(
+                topic=topic,
+                company=company_key,
+                agents=req.agents,
+                turns=req.turns,
+                round_num=1,
+                session_history=[],
+                audit=False,
+            ):
+                yield f"data: {json.dumps(event)}\n\n"
+
+                if event.get("type") == "round_complete":
+                    db = get_mongo_db()
+                    debate_doc = {
+                        "_id": session_id,
+                        "session_id": session_id,
+                        "ticker": req.ticker.upper(),
+                        "company": company_key,
+                        "topic": topic,
+                        "agents": req.agents,
+                        "turns": req.turns,
+                        "history": event.get("history", []),
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "rounds": 1,
+                    }
+                    db["debates"].replace_one({"_id": session_id}, debate_doc, upsert=True)
+
+            # Generator exhausted — emit the final complete event.
+            yield f"data: {json.dumps({'type': 'complete', 'session_id': session_id})}\n\n"
+
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/debate/{session_id}")
+async def get_debate(session_id: str):
+    db = get_mongo_db()
+    doc = db["debates"].find_one({"session_id": session_id})
+    if not doc:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Debate not found")
+    doc.pop("_id", None)
+    return doc
+
+
+@app.get("/debates/{ticker}")
+async def list_debates(ticker: str):
+    db = get_mongo_db()
+    docs = list(db["debates"].find(
+        {"ticker": ticker.upper()},
+        {"session_id": 1, "topic": 1, "created_at": 1, "agents": 1, "_id": 0}
+    ).sort("created_at", -1).limit(20))
+    return docs

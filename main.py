@@ -21,6 +21,7 @@
 import os
 import re
 import sys
+import asyncio
 import argparse
 import anthropic
 from datetime import datetime
@@ -1223,6 +1224,282 @@ def run_round(
 
     final_state = graph.invoke(initial_state)
     return final_state["history"]
+
+
+# ==============================================================================
+# STREAMING DEBATE (async generator twin of run_round / agent_node)
+# ==============================================================================
+# These power the backend's token-streaming /debate/start endpoint. agent_node,
+# synthesis_node and run_round are deliberately left untouched so the CLI keeps
+# working exactly as before; the helpers below replicate their prompt
+# construction byte-for-byte (same indentation = same literal whitespace).
+
+def _build_agent_message(
+    agent: str,
+    topic: str,
+    company: str | None,
+    history: list[dict],
+    agents: list[str],
+    intent: str,
+    audit: bool = False,
+) -> str:
+    """Construct an agent's per-turn user message exactly as agent_node() does."""
+    context = retrieve_context(topic, agent, company, intent=intent, audit=audit)
+
+    # Full session history — agents see everything from all rounds
+    history_text = ""
+    if history:
+        history_text = "\n\n".join([
+            f"{display_name(h['agent'])} (Round {h.get('round',1)}, Turn {h['turn']}):\n{h['response']}"
+            for h in history[-12:]
+        ])
+
+    others      = [a for a in agents if a != agent]
+    other_names = " and ".join(display_name(a) for a in others)
+
+    if not history:
+        header = f"""Topic for debate: {topic}
+        {f'Company under discussion: {company}' if company else ''}
+
+        Relevant context from your research and knowledge base:
+        {context if context else '[No specific context retrieved — draw on your frameworks]'}
+
+        YOUR CONTEXT:
+        You are presenting as yourself — your own frameworks, your own voice,
+        your own convictions — in a structured investment debate with other
+        serious investors. Treat this as a high-stakes internal research
+        meeting where a portfolio manager is deciding whether this company
+        warrants serious capital allocation.
+
+        Your job is not to be balanced. Your job is to give the sharpest,
+        most evidenced version of your actual view. If you are bullish, make
+        the bull case with precision. If you are skeptical, name exactly what
+        would have to be true for you to be wrong.
+
+        Every claim must be grounded in either retrieved financial data or
+        your own retrieved investment philosophy — not general knowledge,
+        not industry averages, not what you think sounds right. If you do
+        not have the data to support a claim, put it in the Go verify section
+        instead of stating it as fact.
+
+        The portfolio manager reading this will verify your key points against
+        the filings before making any decision. Your value is in the quality
+        of the argument and the precision of what you flag as unresolved —
+        not in covering every possible angle."""
+        footer = """
+
+        If you agree with a point already made, do not restate it. Deepen it or advance to the next unresolved question, tackle more vital information to move forward.
+
+        No long paragraphs. No analogies. No biography. If you can't say it in a bullet, it's not sharp enough yet."""
+    else:
+        header = f"""Topic: {topic}
+        {f'Company: {company}' if company else ''}
+
+        Full session history — all prior rounds and arguments:
+        {history_text}
+
+        Relevant context from your research:
+        {context if context else '[No specific context retrieved — draw on your frameworks]'}
+
+        Respond to the arguments made so far by {other_names}. You may challenge a specific point, build on an argument, introduce a new angle, or connect this topic to what was already established in earlier rounds."""
+        footer = """
+
+        If you agree with a point already made, do not restate it. Deepen it or advance to the next unresolved question.
+
+        No long paragraphs. Little analogies. No biography. If you can't say it in a bullet, it's not sharp enough yet."""
+
+    # Shared sections — identical for the opening turn and every later turn.
+    shared = """
+
+        CRITICAL: Read the full debate history before writing. Any point already made by another investor — even if you would frame it differently — must NOT be repeated. Skip it entirely and move to the next unaddressed angle. You will be penalised for restating what has already been said.
+
+        TEMPORAL REASONING — how to use financial data across time:
+
+        All quarters in the financial data are available to you and all of
+        them matter — they form the complete picture of how this business
+        has evolved. Do not ignore older data.
+
+        Apply this hierarchy when drawing conclusions:
+
+        1. TREND FIRST — before citing any individual quarter, establish the
+           direction of the business. Is revenue growth accelerating or
+           decelerating? Are margins expanding or compressing? Is FCF improving
+           as a percentage of revenue? The trend is more important than any
+           single data point.
+
+        2. TRAILING FOUR QUARTERS — this is your primary evidence base for
+           the current state of the business. Weight these most heavily when
+           making claims about where the company stands today.
+
+        3. INFLECTION QUARTERS — some older quarters matter more than others
+           because they represent a turning point. If a key metric changed
+           direction in a specific quarter — NRR dropped, margins expanded
+           suddenly, revenue growth reaccelerated — that quarter deserves
+           explicit mention as the inflection point, not just as historical data.
+           Example: "Gross margins compressed from 74% to 71% in Q2 2023 and
+           have not recovered — that compression predates the AI infrastructure
+           thesis and raises questions about structural pricing power."
+
+        4. OLDER DATA AS CONTEXT — quarters beyond the trailing twelve months
+           should be used to establish the baseline the business grew from, or
+           to identify whether a current trend is a reversion to historical
+           norms or genuinely new behaviour. Never cite an old quarter as
+           equivalent evidence to a recent one without explaining why it is
+           specifically meaningful.
+
+        If pre-computed trend summaries are available in your retrieved context
+        (labelled as TREND ANALYSIS or INFLECTION FLAGS), treat those as
+        authoritative — they were computed directly from the raw financial data.
+
+        If the data does not contain a clear inflection point, say so explicitly
+        rather than treating all quarters as equally weighted.
+
+        FORMAT RULES — follow exactly:
+        1. One conviction sentence — your position, stated plainly
+        2. Bullet points — MAXIMUM 5 bullets per turn. Pick your 3-5 sharpest, most specific observations only. If you have more than 5 points, save them for your next turn. Each bullet maximum 20 words. One observation per bullet. No sub-clauses.
+        3. If one bullet point is insufficient to cover the point being made, have another bullet point that continues the thought, rather than trying to cram it all into one bullet with conjunctions. This forces clarity and precision in each point.
+        4. "Go verify" section — list each verification question on its own line,
+           prefixed with "- ". Maximum 3 questions. Each must be specific and
+           answerable from filings or product data. Format exactly like this:
+           Go verify:
+           - What is SBC as % of revenue for the trailing four quarters?
+           - What is net revenue retention rate — has it crossed below 115%?"""
+
+    return header + shared + footer
+
+
+def _build_synthesis_prompt(
+    history: list[dict],
+    topic: str,
+    company: str | None,
+    agents: list[str],
+    intent: str,
+    current_round: int,
+) -> str:
+    """Construct the synthesis prompt exactly as synthesis_node() does."""
+    # Only synthesise the current round's entries
+    round_history = [h for h in history if h.get("round") == current_round and h["agent"] != "synthesis"]
+
+    history_text = "\n\n".join([
+        f"{display_name(h['agent'])} (Turn {h['turn']}):\n{h['response']}"
+        for h in round_history
+    ])
+
+    agents_list = ", ".join(display_name(a) for a in agents)
+
+    synthesis_prompt = f"""You are a neutral senior analyst synthesising a structured investment debate.
+
+Topic: {topic}
+{f'Company: {company}' if company else ''}
+Participants: {agents_list}
+Focus area: {intent}
+
+Current round transcript:
+{history_text}
+
+Write a synthesis that:
+1. Identifies the core crux of disagreement between the investors on this specific topic
+2. Summarises each investor's strongest argument in one sentence
+3. Notes which empirical questions would resolve the debate
+4. Gives a balanced bottom line — what an investor should take away
+
+Be concise. No more than 4 paragraphs. Do not take sides."""
+
+    return synthesis_prompt
+
+
+async def stream_debate_round(
+    topic: str,
+    company: str | None,
+    agents: list[str],
+    turns: int,
+    round_num: int,
+    session_history: list[dict],
+    audit: bool = False,
+):
+    """Async-generator twin of run_round(): runs the same debate but streams it
+    token by token as event dicts (turn_start / token / turn_end /
+    synthesis_start / synthesis_token / synthesis_end / round_complete). Reuses
+    agent_node's and synthesis_node's exact prompts via the _build_* helpers."""
+    intent  = classify_topic_intent(topic)
+    history = list(session_history)          # accumulates this round's turns
+    total_responses = turns * len(agents)
+
+    for turn in range(1, total_responses + 1):
+        agent         = agents[(turn - 1) % len(agents)]
+        name          = display_name(agent)
+        system_prompt = load_system_prompt(agent)
+        user_message  = _build_agent_message(agent, topic, company, history, agents, intent, audit)
+
+        yield {"type": "turn_start", "agent": agent, "display_name": name, "turn": turn}
+
+        full_response = ""
+        for attempt in range(5):
+            full_response = ""
+            try:
+                with anthropic_client.messages.stream(
+                    model=CLAUDE_MODEL,
+                    max_tokens=DEBATE_MAX_TOKENS,
+                    system=system_prompt,
+                    messages=[{"role": "user", "content": user_message}],
+                ) as stream:
+                    for text in stream.text_stream:
+                        full_response += text
+                        yield {"type": "token", "agent": agent, "token": text}
+                break
+            except anthropic.RateLimitError:
+                if attempt < 4:
+                    yield {"type": "status", "agent": agent,
+                           "message": f"Rate limit hit — waiting 60 seconds before retry ({attempt + 1}/5)..."}
+                    await asyncio.sleep(60)
+                else:
+                    raise
+
+        reply   = full_response.strip()
+        history = history + [{
+            "agent":    agent,
+            "turn":     turn,
+            "round":    round_num,
+            "topic":    topic,
+            "response": reply,
+        }]
+        yield {"type": "turn_end", "agent": agent, "turn": turn, "response": reply}
+
+    # ── Synthesis ──
+    yield {"type": "synthesis_start"}
+    synthesis_prompt = _build_synthesis_prompt(history, topic, company, agents, intent, round_num)
+
+    synthesis = ""
+    for attempt in range(5):
+        synthesis = ""
+        try:
+            with anthropic_client.messages.stream(
+                model=CLAUDE_MODEL,
+                max_tokens=800,
+                messages=[{"role": "user", "content": synthesis_prompt}],
+            ) as stream:
+                for text in stream.text_stream:
+                    synthesis += text
+                    yield {"type": "synthesis_token", "token": text}
+            break
+        except anthropic.RateLimitError:
+            if attempt < 4:
+                yield {"type": "status",
+                       "message": f"Rate limit hit — waiting 60 seconds before retry ({attempt + 1}/5)..."}
+                await asyncio.sleep(60)
+            else:
+                raise
+
+    synthesis = synthesis.strip()
+    history   = history + [{
+        "agent":    "synthesis",
+        "turn":     0,
+        "round":    round_num,
+        "topic":    topic,
+        "response": synthesis,
+    }]
+    yield {"type": "synthesis_end", "response": synthesis}
+    yield {"type": "round_complete", "history": history}
 
 
 def main():
