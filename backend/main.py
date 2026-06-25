@@ -706,15 +706,18 @@ async def start_debate(req: DebateRequest):
 
                 if event.get("type") == "round_complete":
                     db = get_mongo_db()
-                    # If this session already exists, append the new round's
-                    # history; otherwise create the document for round 1.
+                    # If this session already exists, refresh it; otherwise create
+                    # the document for round 1.
                     existing = db["debates"].find_one({"session_id": session_id})
                     if existing:
-                        combined_history = existing.get("history", []) + event["history"]
+                        # event["history"] is the FULL accumulated session history
+                        # (the engine seeds each round from session_history), so we
+                        # store it directly — concatenating onto the existing doc
+                        # would duplicate every prior round.
                         db["debates"].update_one(
                             {"session_id": session_id},
                             {"$set": {
-                                "history": combined_history,
+                                "history": event["history"],
                                 "rounds": existing.get("rounds", 1) + 1,
                                 "updated_at": datetime.now(timezone.utc).isoformat()
                             }}
@@ -763,6 +766,25 @@ async def get_debate(session_id: str):
         raise HTTPException(status_code=404, detail="Debate not found")
     doc.pop("_id", None)
     return doc
+
+
+@app.get("/debates")
+async def list_all_debates():
+    db = get_mongo_db()
+    docs = list(db["debates"].find(
+        {},
+        {
+            "session_id": 1,
+            "ticker": 1,
+            "company": 1,
+            "topic": 1,
+            "created_at": 1,
+            "agents": 1,
+            "rounds": 1,
+            "_id": 0,
+        }
+    ).sort("created_at", -1).limit(50))
+    return docs
 
 
 @app.get("/debates/{ticker}")

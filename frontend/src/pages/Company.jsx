@@ -160,6 +160,78 @@ export default function Company() {
   const finRows =
     financialView === "ttm" ? finArr.slice() : finArr.slice().reverse();
 
+  // ── Margins trend table — 4 margin rows across the selected view's periods ──
+  // Parse a backend money string ("$1.2B", "$-84.3M", "N/A") to a Number,
+  // honouring parenthesised / leading-minus negatives.
+  const parseM = (s) => {
+    if (!s || s === "N/A") return null;
+    const neg = s.includes("(") || s.startsWith("-");
+    const n = parseFloat(s.replace(/[$(),BMK]/g, ""));
+    if (isNaN(n)) return null;
+    const abs = s.includes("B")
+      ? n * 1e9
+      : s.includes("M")
+      ? n * 1e6
+      : s.includes("K")
+      ? n * 1e3
+      : n;
+    return neg ? -abs : abs;
+  };
+
+  // The margins table shares the financial table's view-aware rows (finRows), so
+  // the single Quarterly/Annual/TTM toggle drives both tables at once.
+  const ratio = (numStr, revStr) => {
+    const num = parseM(numStr);
+    const rev = parseM(revStr);
+    if (num == null || rev == null || rev === 0) return null;
+    return num / rev;
+  };
+  const fmtPct = (v) => (v == null ? "N/A" : `${(v * 100).toFixed(1)}%`);
+  const numTone = (v) =>
+    v == null ? "text-tikt-green/50" : v < 0 ? "text-red-600" : "text-tikt-green";
+  const strTone = (s) =>
+    !s || s === "N/A"
+      ? "text-tikt-green/50"
+      : s.includes("-") || s.includes("−") || s.startsWith("(")
+      ? "text-red-600"
+      : "text-tikt-green";
+
+  // Each margin row: a label + one {value, tone} cell per period (oldest→newest).
+  // Gross margin is already formatted by the backend; the rest are computed here.
+  const marginRows = [
+    {
+      label: "Gross Margin",
+      cells: finRows.map((row) => ({
+        value:
+          row.gross_margin && row.gross_margin !== "N/A"
+            ? row.gross_margin
+            : "N/A",
+        tone: strTone(row.gross_margin),
+      })),
+    },
+    {
+      label: "Operating Margin",
+      cells: finRows.map((row) => {
+        const v = ratio(row.operating_income, row.revenue);
+        return { value: fmtPct(v), tone: numTone(v) };
+      }),
+    },
+    {
+      label: "Net Income Margin",
+      cells: finRows.map((row) => {
+        const v = ratio(row.net_income, row.revenue);
+        return { value: fmtPct(v), tone: numTone(v) };
+      }),
+    },
+    {
+      label: "FCF Margin",
+      cells: finRows.map((row) => {
+        const v = ratio(row.fcf, row.revenue);
+        return { value: fmtPct(v), tone: numTone(v) };
+      }),
+    },
+  ];
+
   const priceUp = (profile?.change ?? 0) >= 0;
 
   return (
@@ -355,37 +427,37 @@ export default function Company() {
                 ))}
               </div>
 
-              {/* ───────────── FINANCIAL TABLE (full width) ───────────── */}
-              <div className="mt-6 overflow-hidden rounded-lg border-[0.5px] border-tikt-green/15 bg-white">
-                {/* header row: title + quarterly/annual toggle */}
-                <div className="flex items-center justify-between px-6 pb-4 pt-5">
-                  <div className="text-[11px] font-semibold uppercase tracking-[2px] text-tikt-gold">
-                    Financial Summary
-                  </div>
-                  <div className="flex rounded border-[0.5px] border-tikt-green/15 p-0.5">
-                    {[
-                      { k: "quarterly", label: "Quarterly" },
-                      { k: "annual", label: "Annual" },
-                      { k: "ttm", label: "TTM" },
-                    ].map((opt) => {
-                      const active = financialView === opt.k;
-                      return (
-                        <button
-                          key={opt.k}
-                          type="button"
-                          onClick={() => setFinancialView(opt.k)}
-                          className={`rounded-[3px] px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.5px] ${
-                            active
-                              ? "bg-tikt-gold/15 text-tikt-gold"
-                              : "text-tikt-green/50 hover:text-tikt-green"
-                          }`}
-                        >
-                          {opt.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
+              {/* ─────────── FINANCIAL SUMMARY + MARGINS (shared view toggle) ─────────── */}
+              <div className="mt-6 mb-3 text-[11px] font-semibold uppercase tracking-[2px] text-tikt-gold">
+                Financial Summary
+              </div>
+              {/* shared Quarterly/Annual/TTM toggle — controls BOTH tables below */}
+              <div className="mb-3 flex w-fit rounded border-[0.5px] border-tikt-green/15 p-0.5">
+                {[
+                  { k: "quarterly", label: "Quarterly" },
+                  { k: "annual", label: "Annual" },
+                  { k: "ttm", label: "TTM" },
+                ].map((opt) => {
+                  const active = financialView === opt.k;
+                  return (
+                    <button
+                      key={opt.k}
+                      type="button"
+                      onClick={() => setFinancialView(opt.k)}
+                      className={`rounded-[3px] px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.5px] ${
+                        active
+                          ? "bg-tikt-gold/15 text-tikt-gold"
+                          : "text-tikt-green/50 hover:text-tikt-green"
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* financial summary table card (view toggle moved out, above) */}
+              <div className="overflow-hidden rounded-lg border-[0.5px] border-tikt-green/15 bg-white">
 
                 <div className="overflow-x-auto">
                   {loading.financials ? (
@@ -441,6 +513,70 @@ export default function Company() {
                       </tbody>
                     </table>
                   )}
+                </div>
+              </div>
+
+              {/* ───────────── MARGINS (trend table) ───────────── */}
+              <div className="mt-6">
+                <div className="mb-3 text-[11px] font-semibold uppercase tracking-[2px] text-tikt-gold">
+                  Margins
+                </div>
+                <div className="overflow-hidden rounded-lg border-[0.5px] border-tikt-green/15 bg-white">
+                  <div className="overflow-x-auto">
+                    {loading.financials ? (
+                      <div className="px-6 py-10 text-center text-[13px] text-tikt-green/50">
+                        Loading…
+                      </div>
+                    ) : finRows.length === 0 ? (
+                      <div className="px-6 py-10 text-center text-[13px] text-tikt-green/50">
+                        No margin data available.
+                      </div>
+                    ) : (
+                      <table className="w-full border-collapse">
+                        <thead>
+                          <tr className="border-b border-tikt-gold/20">
+                            <th className="px-6 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[1px] text-tikt-green/50">
+                              Metric
+                            </th>
+                            {finRows.map((row, i) => (
+                              <th
+                                key={row.period}
+                                className={`whitespace-nowrap px-4 py-2.5 text-right text-[11px] font-semibold uppercase tracking-[1px] ${
+                                  i === finRows.length - 1
+                                    ? "text-tikt-gold"
+                                    : "text-tikt-green/50"
+                                }`}
+                              >
+                                {row.period}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {marginRows.map((r, i) => (
+                            <tr
+                              key={r.label}
+                              className={i % 2 === 1 ? "bg-tikt-green/[0.02]" : ""}
+                            >
+                              <td className="whitespace-nowrap px-6 py-3 text-left text-[13px] font-semibold text-tikt-green">
+                                {r.label}
+                              </td>
+                              {r.cells.map((cell, j) => (
+                                <td
+                                  key={finRows[j].period}
+                                  className={`whitespace-nowrap px-4 py-3 text-right text-[13px] tabular-nums ${
+                                    loading.financials ? "text-tikt-green/50" : cell.tone
+                                  }`}
+                                >
+                                  {loading.financials ? "—" : cell.value}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
                 </div>
               </div>
 

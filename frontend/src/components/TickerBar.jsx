@@ -4,7 +4,7 @@
 // filename is kept so existing imports keep resolving; it is imported as
 // `Sidebar` in Home.jsx.
 
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 
 function IconResearch() {
   return (
@@ -16,17 +16,23 @@ function IconResearch() {
   );
 }
 
-function NavItem({ icon, label, active }) {
+function NavItem({ icon, label, active, onClick }) {
   if (active) {
     return (
-      <div className="flex cursor-pointer items-center gap-3 rounded-md border-l-2 border-tikt-green bg-tikt-panel px-3 py-2.5 text-sm font-semibold text-tikt-green shadow-[0_1px_2px_rgba(64,52,24,0.05)]">
+      <div
+        onClick={onClick}
+        className="flex cursor-pointer items-center gap-3 rounded-md border-l-2 border-tikt-green bg-tikt-panel px-3 py-2.5 text-sm font-semibold text-tikt-green shadow-[0_1px_2px_rgba(64,52,24,0.05)]"
+      >
         {icon}
         {label}
       </div>
     );
   }
   return (
-    <div className="flex cursor-pointer items-center gap-3 rounded-md border-l-2 border-transparent px-3 py-2.5 text-sm font-medium text-tikt-muted hover:bg-tikt-hover hover:text-tikt-ink">
+    <div
+      onClick={onClick}
+      className="flex cursor-pointer items-center gap-3 rounded-md border-l-2 border-transparent px-3 py-2.5 text-sm font-medium text-tikt-muted hover:bg-tikt-hover hover:text-tikt-ink"
+    >
       {icon}
       {label}
     </div>
@@ -62,6 +68,7 @@ const NAV = [
   },
   {
     label: "History",
+    to: "/history",
     icon: (
       <div className="flex w-4 justify-center">
         <div className="h-[11px] w-[11px] rounded-full border-[1.6px] border-current" />
@@ -78,6 +85,7 @@ const RECENT = [
 
 export default function Sidebar() {
   const navigate = useNavigate();
+  const location = useLocation();
 
   return (
     <aside className="flex w-64 flex-shrink-0 flex-col border-r border-tikt-border bg-tikt-sand px-[18px] py-6 text-tikt-body">
@@ -115,7 +123,17 @@ export default function Sidebar() {
       {/* nav */}
       <nav className="flex flex-col gap-0.5">
         {NAV.map((n) => (
-          <NavItem key={n.label} icon={n.icon} label={n.label} active={n.active} />
+          <NavItem
+            key={n.label}
+            icon={n.icon}
+            label={n.label}
+            active={
+              n.to
+                ? location.pathname === n.to
+                : location.pathname === "/" && n.active
+            }
+            onClick={n.to ? () => navigate(n.to) : undefined}
+          />
         ))}
       </nav>
 

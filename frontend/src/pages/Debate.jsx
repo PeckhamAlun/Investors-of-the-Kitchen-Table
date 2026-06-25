@@ -95,6 +95,18 @@ function renderResponse(text, showCursor) {
   const lastIdx = lines.length - 1;
   let inGoVerify = false;
 
+  // Minimal, safe inline markdown: escape HTML first, then render **bold** and
+  // *italic*. Used via dangerouslySetInnerHTML for paragraph and bullet text.
+  const renderInline = (raw) => {
+    const safe = raw
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+    return safe
+      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+      .replace(/\*([^*\n]+?)\*/g, "<em>$1</em>");
+  };
+
   return lines.map((line, idx) => {
     const trimmed = line.trim();
     const isBullet = trimmed.startsWith("- ") || trimmed.startsWith("* ");
@@ -131,7 +143,7 @@ function renderResponse(text, showCursor) {
         >
           <span className="text-tikt-gold">•</span>
           <span>
-            {content}
+            <span dangerouslySetInnerHTML={{ __html: renderInline(content) }} />
             {cursor}
           </span>
         </div>
@@ -146,11 +158,29 @@ function renderResponse(text, showCursor) {
       );
     }
 
+    // A whole-line bold "**heading**" (and nothing else) → larger, spaced bold
+    // paragraph. The inner-** guard avoids matching lines with two bold spans.
+    const headingMatch = trimmed.match(/^\*\*(.+)\*\*$/);
+    if (headingMatch && !headingMatch[1].includes("**")) {
+      inGoVerify = false;
+      return (
+        <p
+          key={idx}
+          className="mt-4 text-[16px] font-bold leading-7 text-tikt-green"
+        >
+          <span
+            dangerouslySetInnerHTML={{ __html: renderInline(headingMatch[1]) }}
+          />
+          {cursor}
+        </p>
+      );
+    }
+
     // A normal paragraph line ends any open Go-verify block.
     inGoVerify = false;
     return (
       <p key={idx} className="mt-2 text-[15px] leading-7 text-tikt-green">
-        {line}
+        <span dangerouslySetInnerHTML={{ __html: renderInline(line) }} />
         {cursor}
       </p>
     );
@@ -163,6 +193,12 @@ export default function Debate() {
   const navigate = useNavigate();
   const symbol = (ticker || "").toUpperCase();
   const company = state?.company || symbol;
+
+  // ── resume mode ─────────────────────────────────────────────────────────
+  // Opened from History.jsx with { resume: true, session_id }. We fetch the
+  // saved session and rebuild the transcript instead of showing the setup screen.
+  const resumeSessionId = state?.session_id || null;
+  const isResume = !!state?.resume;
 
   // ── setup-screen config ────────────────────────────────────────────────
   const [selectedAgents, setSelectedAgents] = useState(() => [...DEFAULT_AGENTS]);
@@ -177,6 +213,7 @@ export default function Debate() {
   const [status, setStatus] = useState("idle"); // idle | ingesting | running | complete | error
   const [sessionId, setSessionId] = useState(null);
   const [error, setError] = useState(null);
+  const [isLoading, setIsLoading] = useState(!!isResume); // resume fetch in flight
 
   // ── follow-up / multi-round state ──────────────────────────────────────
   const [followUpTopic, setFollowUpTopic] = useState("");
@@ -373,6 +410,12 @@ export default function Debate() {
     if (!followUpTopic.trim()) return;
     const followUp = followUpTopic;
     setFollowUpTopic("");
+    // Insert a round header into the transcript so the new round is visually
+    // separated and labelled with its follow-up topic before its turns stream in.
+    setTurns((prev) => [
+      ...prev,
+      { isRoundHeader: true, roundNum: roundNum, topic: followUp },
+    ]);
     runStream(
       {
         ticker: symbol,
@@ -388,6 +431,71 @@ export default function Debate() {
     );
   };
 
+  // Resume mode — fetch the saved session and rebuild the transcript, then drop
+  // straight into the "complete" state (with the follow-up box) so the user can
+  // continue where the debate left off.
+  useEffect(() => {
+    if (!isResume || !resumeSessionId) return;
+    let cancelled = false;
+    fetch(`${API}/debate/${resumeSessionId}`)
+      .then((r) => {
+        if (!r.ok) throw new Error("not ok");
+        return r.json();
+      })
+      .then((doc) => {
+        if (cancelled) return;
+        const hist = Array.isArray(doc.history) ? doc.history : [];
+        const speakers = hist
+          .filter((h) => h.agent !== "synthesis")
+          .map((h) => ({
+            agent: h.agent,
+            display_name: displayName(h.agent),
+            turn: h.turn,
+            response: h.response,
+            complete: true,
+            round: h.round,
+          }));
+        const synth = hist
+          .filter((h) => h.agent === "synthesis")
+          .map((h) => ({
+            agent: "synthesis",
+            display_name: "Analyst Synthesis",
+            turn: 0,
+            response: h.response,
+            complete: true,
+            round: h.round,
+          }));
+        // Sort by round, then synthesis LAST within a round, then turn. Synthesis
+        // is stored with turn:0, so a plain "round then turn" sort would render it
+        // first and break the round-divider logic in PHASE 2.
+        const reconstructed = [...speakers, ...synth].sort(
+          (a, b) =>
+            (a.round ?? 1) - (b.round ?? 1) ||
+            ((a.agent === "synthesis") - (b.agent === "synthesis")) ||
+            (a.turn ?? 0) - (b.turn ?? 0)
+        );
+        setTurns(reconstructed);
+        setSessionId(doc.session_id || resumeSessionId);
+        setAllHistory(hist);
+        setRoundNum((doc.rounds || 1) + 1);
+        if (Array.isArray(doc.agents) && doc.agents.length) {
+          setSelectedAgents(doc.agents);
+        }
+        if (doc.topic) setTopic(doc.topic);
+        setStatus("complete");
+        setIsLoading(false);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setStatus("error");
+        setError("Could not load this debate session.");
+        setIsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isResume, resumeSessionId]);
+
   // Abort any in-flight stream on unmount. (No auto-start — the debate begins
   // only when the user clicks "Start Debate".)
   useEffect(() => () => controllerRef.current?.abort(), []);
@@ -397,6 +505,17 @@ export default function Debate() {
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [turns.length, status]);
+
+  // ───────────────────────────────────────────────────────────────────────
+  // RESUME — loading the saved session (shown instead of the setup screen)
+  // ───────────────────────────────────────────────────────────────────────
+  if (isLoading) {
+    return (
+      <div className="flex min-h-0 w-full flex-1 items-center justify-center bg-tikt-cream font-inter">
+        <div className="text-[14px] text-tikt-green/50">Loading debate…</div>
+      </div>
+    );
+  }
 
   // ───────────────────────────────────────────────────────────────────────
   // PHASE 1 — SETUP SCREEN (full width, no sidebar)
@@ -595,7 +714,7 @@ export default function Debate() {
           <div className="text-[14px] font-semibold uppercase tracking-[2px] text-tikt-gold">
             {symbol} · Debate
           </div>
-          <h1 className="mt-1.5 font-display text-[36px] font-bold leading-tight text-tikt-green">
+          <h1 className="mt-1.5 line-clamp-2 font-display text-[22px] font-bold leading-tight text-tikt-green">
             {topic}
           </h1>
 
@@ -624,6 +743,27 @@ export default function Debate() {
               let sawSynthesis = false;
 
               return turns.map((t, i) => {
+                // Follow-up round header — a full-width divider labelled with the
+                // round number and the follow-up topic. Resetting sawSynthesis here
+                // suppresses the automatic round divider for the turn that follows.
+                if (t.isRoundHeader) {
+                  sawSynthesis = false;
+                  return (
+                    <div key={i} className="my-8 flex flex-col items-center gap-3">
+                      <div className="flex w-full items-center gap-4">
+                        <div className="h-px flex-1 bg-tikt-gold/40" />
+                        <span className="text-[11px] font-semibold uppercase tracking-[2px] text-tikt-gold">
+                          Round {t.roundNum}
+                        </span>
+                        <div className="h-px flex-1 bg-tikt-gold/40" />
+                      </div>
+                      <p className="max-w-[680px] text-center font-display text-[16px] italic text-tikt-green">
+                        {t.topic}
+                      </p>
+                    </div>
+                  );
+                }
+
                 // System / ingest-progress turns render as a centered status card.
                 if (t.isSystem) {
                   return (
