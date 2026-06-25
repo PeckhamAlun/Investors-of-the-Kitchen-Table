@@ -428,8 +428,17 @@ export default function Company() {
               </div>
 
               {/* ─────────── FINANCIAL SUMMARY + MARGINS (shared view toggle) ─────────── */}
-              <div className="mt-6 mb-3 text-[11px] font-semibold uppercase tracking-[2px] text-tikt-gold">
-                Financial Summary
+              <div className="mt-6 mb-3 flex items-center justify-between">
+                <div className="text-[11px] font-semibold uppercase tracking-[2px] text-tikt-gold">
+                  Financial Summary
+                </div>
+                <button
+                  type="button"
+                  onClick={() => navigate(`/company/${symbol}/statements`)}
+                  className="text-[12px] font-semibold text-tikt-gold hover:text-tikt-greenDark"
+                >
+                  View Full Statements →
+                </button>
               </div>
               {/* shared Quarterly/Annual/TTM toggle — controls BOTH tables below */}
               <div className="mb-3 flex w-fit rounded border-[0.5px] border-tikt-green/15 p-0.5">

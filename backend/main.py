@@ -552,6 +552,92 @@ async def company_financials(ticker: str):
     return result
 
 
+@app.get("/company/{ticker}/statements")
+async def company_statements(
+    ticker: str,
+    type: str = "income",
+    period: str = "annual"
+):
+    key = f"statements_{ticker.upper()}_{type}_{period}"
+    cached = cache_get(key, FINANCIALS_TTL)
+    if cached is not None:
+        return cached
+
+    import asyncio
+    sym = ticker.upper()
+    base = "https://financialmodelingprep.com/stable"
+    params = f"symbol={sym}&apikey={FMP_API_KEY}"
+    endpoint_map = {
+        "income": "income-statement",
+        "balance": "balance-sheet-statement",
+        "cashflow": "cash-flow-statement",
+    }
+    fmp_endpoint = endpoint_map.get(type, "income-statement")
+
+    # TTM is a trailing-4-quarter aggregate — a FLOW concept, so it applies only
+    # to the income statement and cash-flow statement. For the balance sheet (a
+    # point-in-time snapshot) fall back to quarterly. Annual/quarterly keep the
+    # original raw-passthrough behaviour.
+    is_ttm = period == "ttm" and type != "balance"
+    if is_ttm:
+        fmp_period, limit = "quarter", 8
+    else:
+        fmp_period = "quarter" if period == "quarterly" else "annual"
+        limit = 8 if period == "quarterly" else 5
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{base}/{fmp_endpoint}?{params}&period={fmp_period}&limit={limit}",
+            timeout=15
+        )
+        resp.raise_for_status()
+
+    data = resp.json()
+
+    if is_ttm:
+        # Build rolling trailing-twelve-month windows from the quarterly rows
+        # (FMP returns newest-first; window i covers quarters i..i+3). Dollar
+        # flows and EPS are summed across the 4 quarters; weighted-average share
+        # counts are averaged; non-numeric fields carry the most recent value.
+        def _q_label(row):
+            yr = row.get("calendarYear") or row.get("fiscalYear") or ""
+            return f"{row.get('period', '')} {yr}".strip()
+
+        result = []
+        for i in range(len(data) - 3):
+            window = data[i:i + 4]
+            head = window[0]
+            agg = {}
+            for k in head.keys():
+                vals = [q.get(k) for q in window]
+                nums = [v for v in vals
+                        if isinstance(v, (int, float)) and not isinstance(v, bool)]
+                non_null = [v for v in vals if v is not None]
+                if nums and len(nums) == len(non_null):
+                    if "shs" in k.lower() or "shares" in k.lower():
+                        agg[k] = sum(nums) / len(nums)
+                    else:
+                        agg[k] = sum(nums)
+                else:
+                    agg[k] = head.get(k)
+            agg["periodLabel"] = f"TTM {_q_label(head)}"
+            result.append(agg)
+        result.reverse()  # oldest-first for left-to-right display
+    else:
+        # Return raw FMP data — frontend handles label mapping; just add a
+        # formatted period label to each row.
+        result = []
+        for row in data:
+            year = row.get("calendarYear") or row.get("fiscalYear") or ""
+            per = row.get("period", "")
+            label = f"{per} {year}".strip() if fmp_period == "quarter" else f"FY {year}".strip()
+            result.append({**row, "periodLabel": label})
+        result.reverse()  # oldest-first for left-to-right display
+
+    cache_set(key, result)
+    return result
+
+
 class DebateRequest(BaseModel):
     ticker: str
     company: str
