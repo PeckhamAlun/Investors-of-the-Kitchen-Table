@@ -1114,6 +1114,70 @@ def run_audit(company_arg):
 
 
 # ==============================================================================
+# NON-INTERACTIVE AUTO-INGEST (for servers / background callers)
+# ==============================================================================
+
+def ingest_by_ticker(ticker, display=None, exchange=None, progress=None):
+    """Non-interactive auto-ingest of a company's financials by ticker.
+
+    The same pipeline as main() — FMP pull -> build chunks -> embed + store in the
+    MongoDB Atlas `company_financials` collection (versioned, non-destructive) —
+    but with NO interactive confirmation (no resolve_ticker prompt), so it is safe
+    to call from a server or a background thread (e.g. the FastAPI /debate/start
+    auto-ingest path).
+
+    `display` overrides the company display name (defaults to the FMP profile name,
+    then the ticker). `progress`, if given, is called with a short status string at
+    the start of each phase. Returns (company_key, added, total). Raises ValueError
+    when FMP has no usable financial data for the ticker (rather than sys.exit, so
+    callers can surface a clean error instead of killing their process)."""
+    def _say(msg):
+        if progress:
+            progress(msg)
+
+    ticker = ticker.upper()
+
+    # STEP 1/2 — FMP data pull (skips the interactive resolve_ticker confirmation).
+    _say("Pulling financial statements from FMP…")
+    try:
+        fmp = pull_fmp_financials(ticker)
+    except SystemExit as exc:
+        # pull_fmp_financials uses sys.exit() as its error channel; convert it to a
+        # normal exception so server callers don't get a SystemExit.
+        raise ValueError(str(exc) or f"FMP has no data for '{ticker}'.")
+    if not fmp.get("income"):
+        raise ValueError(f"FMP returned no income-statement data for '{ticker}'.")
+
+    profile = fmp.get("profile") or []
+    display = display or (profile[0].get("companyName") if profile else None) or ticker
+
+    # company KEY used for storage + retrieval — identical derivation to main() so
+    # the stored key matches what the debate engine queries by.
+    clean = re.sub(r",?\s+(inc\.?|incorporated|corp\.?|corporation|co\.?|ltd\.?|plc|holdings|group)\b",
+                   "", display, flags=re.IGNORECASE)
+    clean = clean.strip().rstrip(".,").strip()
+    company_key = normalize_company(clean)
+
+    # STEP 3 — build all chunks (pure transforms over the FMP data; no network).
+    _say("Building financial summaries…")
+    chunks = build_market_chunks(display, ticker, fmp)
+    computed = build_computed_chunk(display, ticker, fmp)
+    if computed:
+        chunks.append(computed)
+    ttm = compute_ttm_chunk(display, ticker, fmp)
+    if ttm is not None:
+        chunks.append(ttm)
+    trend = compute_trend_analysis(display, ticker, fmp)
+    if trend:
+        chunks.append(trend)
+
+    # STEP 5 — embed + store (one Gemini embedding per chunk; versioned ingest).
+    _say("Embedding and storing in the knowledge base…")
+    added, total = ingest(chunks, company_key, ticker, exchange, False)
+    return company_key, added, total
+
+
+# ==============================================================================
 # MAIN
 # ==============================================================================
 

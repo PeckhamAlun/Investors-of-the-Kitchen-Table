@@ -569,32 +569,87 @@ async def start_debate(req: DebateRequest):
         try:
             # Load the project-root debate engine under a distinct module name so
             # it doesn't clash with this backend's own `main` module. It also
-            # re-exports normalize_company / get_latest_ingest_version (imported
-            # into its namespace), so we pull everything from it and never mutate
-            # sys.path here — which would shadow `main` and break `uvicorn main:app`.
-            engine = _load_debate_engine()
-            normalize_company = engine.normalize_company
+            # re-exports get_latest_ingest_version (imported into its namespace), so
+            # we pull it from there and never mutate sys.path here — which would
+            # shadow `main` and break `uvicorn main:app`.
+            # Loading the root engine runs all of its module-level code
+            # (MongoDB + Gemini client init) synchronously, which would block the
+            # FastAPI event loop. Run it in a thread pool executor instead.
+            import concurrent.futures
+            loop = asyncio.get_event_loop()
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                engine = await loop.run_in_executor(pool, _load_debate_engine)
             get_latest_ingest_version = engine.get_latest_ingest_version
 
             session_id = req.session_id or str(uuid.uuid4())
-            # Resolve the company key by ticker — the stored key is always exact.
-            company_key = get_company_key_by_ticker(req.ticker)
-            if not company_key:
-                # Not ingested yet — derive a key from the display name as a
-                # fallback. It gets set properly during the ingest step anyway.
-                import re
-
-                clean = re.sub(
-                    r",?\s+(inc\.?|incorporated|corp\.?|corporation|co\.?|ltd\.?|plc|holdings|group)\b",
-                    "", req.company, flags=re.IGNORECASE
-                ).strip().rstrip(".,").strip()
-                company_key = normalize_company(clean)
             topic = req.topic or f"Is {req.ticker} a good investment?"
+            ticker = req.ticker.upper()
 
-            # Check if company is ingested
+            # Resolve the company key by ticker — the stored key is always exact.
+            company_key = get_company_key_by_ticker(ticker)
+
+            if not company_key:
+                # NOT INGESTED → auto-ingest this company's financials by ticker,
+                # streaming progress to the UI (the frontend renders ingest_start /
+                # ingest_progress / ingest_complete as a "Preparing Research" card),
+                # then fall through into the debate. The ingest pipeline lives in
+                # scripts/analyse_company.py and is importable here because loading
+                # the engine put the project root on sys.path (root main.py line 39).
+                from scripts.analyse_company import ingest_by_ticker
+
+                display = req.company or ticker
+                yield f"data: {json.dumps({'type': 'ingest_start', 'message': f'Preparing research data for {display} ({ticker})…'})}\n\n"
+
+                # The ingest is synchronous and slow (blocking FMP calls + one Gemini
+                # embedding per chunk, minutes total), so it runs in a worker thread.
+                # It reports progress back over an asyncio queue via the loop's
+                # thread-safe scheduler, so the event loop is never blocked.
+                progress_q: asyncio.Queue = asyncio.Queue()
+
+                def _emit(kind, payload):
+                    loop.call_soon_threadsafe(progress_q.put_nowait, (kind, payload))
+
+                def _run_ingest():
+                    try:
+                        result = ingest_by_ticker(
+                            ticker,
+                            display=display,
+                            progress=lambda m: _emit("progress", m),
+                        )
+                        _emit("result", result)
+                    except BaseException as exc:  # incl. SystemExit from FMP helpers
+                        _emit("error", str(exc) or exc.__class__.__name__)
+
+                # Default executor (not a `with` pool) so an early return on timeout
+                # never blocks on shutdown(wait=True) while the ingest is still running.
+                loop.run_in_executor(None, _run_ingest)
+
+                ingest_key = None
+                added = 0
+                while True:
+                    try:
+                        kind, payload = await asyncio.wait_for(progress_q.get(), timeout=300)
+                    except asyncio.TimeoutError:
+                        yield f"data: {json.dumps({'type': 'error', 'message': 'Auto-ingest timed out.'})}\n\n"
+                        return
+                    if kind == "progress":
+                        yield f"data: {json.dumps({'type': 'ingest_progress', 'message': payload})}\n\n"
+                        continue
+                    if kind == "error":
+                        yield f"data: {json.dumps({'type': 'error', 'message': f'Auto-ingest failed: {payload}'})}\n\n"
+                        return
+                    # kind == "result": (company_key, added, total)
+                    ingest_key, added, _total = payload
+                    break
+
+                yield f"data: {json.dumps({'type': 'ingest_complete', 'message': f'Research data ready ({added} chunks).'})}\n\n"
+                # Re-resolve to the exact stored key (always exact by ticker).
+                company_key = get_company_key_by_ticker(ticker) or ingest_key
+
+            # Final safety: confirm the company is now ingested before debating.
             _, version = get_latest_ingest_version(company_key)
             if version == 0:
-                yield f"data: {json.dumps({'type': 'error', 'message': f'Company {req.company} not ingested. Please ingest first.'})}\n\n"
+                yield f"data: {json.dumps({'type': 'error', 'message': f'Company {req.company} could not be ingested.'})}\n\n"
                 return
 
             # Emit session start
@@ -603,15 +658,50 @@ async def start_debate(req: DebateRequest):
             # Stream the debate token-by-token straight from the engine. Each event
             # is piped to the SSE stream verbatim. On round_complete we persist the
             # finished round to MongoDB (exactly as before), then keep streaming.
-            async for event in engine.stream_debate_round(
-                topic=topic,
-                company=company_key,
-                agents=req.agents,
-                turns=req.turns,
-                round_num=req.round_num,
-                session_history=req.session_history,
-                audit=False,
-            ):
+            # The engine's async generator drives SYNCHRONOUS Anthropic streaming
+            # (messages.stream(), not messages.astream()), so iterating it directly
+            # on the event loop would block it. Run the generator in a worker thread
+            # with its own event loop and bridge its events back over a queue.
+            import queue
+            import threading
+
+            event_queue = queue.Queue()
+
+            def run_generator():
+                try:
+                    import asyncio as _asyncio
+                    loop = _asyncio.new_event_loop()
+                    _asyncio.set_event_loop(loop)
+
+                    async def _collect():
+                        async for event in engine.stream_debate_round(
+                            topic=topic,
+                            company=company_key,
+                            agents=req.agents,
+                            turns=req.turns,
+                            round_num=req.round_num,
+                            session_history=req.session_history,
+                            audit=False,
+                        ):
+                            event_queue.put(event)
+
+                    loop.run_until_complete(_collect())
+                except Exception as e:
+                    event_queue.put({"type": "error", "message": str(e)})
+                finally:
+                    event_queue.put(None)  # sentinel
+
+            thread = threading.Thread(target=run_generator, daemon=True)
+            thread.start()
+
+            while True:
+                try:
+                    event = event_queue.get(timeout=300)
+                except queue.Empty:
+                    yield f"data: {json.dumps({'type': 'error', 'message': 'Timeout'})}\n\n"
+                    break
+                if event is None:
+                    break
                 yield f"data: {json.dumps(event)}\n\n"
 
                 if event.get("type") == "round_complete":
@@ -645,6 +735,8 @@ async def start_debate(req: DebateRequest):
                         db["debates"].replace_one(
                             {"_id": session_id}, debate_doc, upsert=True
                         )
+
+                await asyncio.sleep(0)
 
             # Generator exhausted — emit the final complete event.
             yield f"data: {json.dumps({'type': 'complete', 'session_id': session_id})}\n\n"
