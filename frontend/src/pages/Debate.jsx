@@ -187,6 +187,55 @@ function renderResponse(text, showCursor) {
   });
 }
 
+// Collapsible "SOURCES" disclosure shown under a completed agent turn. Default
+// collapsed; expands to a list of source names (max 8, "+ N more" beyond that).
+// Company sources read in dark green; philosophy sources in muted italic.
+const SOURCES_MAX = 8;
+
+function SourcesSection({ sources }) {
+  const [expanded, setExpanded] = useState(false);
+  const extra = sources.length - SOURCES_MAX;
+
+  return (
+    <div className="mt-3 border-t border-tikt-green/10 pt-2">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+        className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[1.5px] text-tikt-gold/70 hover:text-tikt-gold"
+      >
+        <span
+          className={`inline-block transition-transform ${
+            expanded ? "rotate-90" : ""
+          }`}
+        >
+          ›
+        </span>
+        Sources
+      </button>
+      {expanded && (
+        <div className="mt-2 flex flex-col gap-1">
+          {sources.slice(0, SOURCES_MAX).map((s, idx) => (
+            <div
+              key={idx}
+              className={
+                s.collection === "company"
+                  ? "text-[11px] text-tikt-green"
+                  : "text-[11px] italic text-tikt-green/50"
+              }
+            >
+              {s.source}
+            </div>
+          ))}
+          {extra > 0 && (
+            <div className="text-[11px] text-tikt-green/40">+ {extra} more</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Debate() {
   const { ticker } = useParams();
   const { state } = useLocation();
@@ -220,6 +269,15 @@ export default function Debate() {
   const [roundNum, setRoundNum] = useState(1);
   const [allHistory, setAllHistory] = useState([]);
 
+  // ── research-document upload state ─────────────────────────────────────
+  // uploadedDocs: { filename, status: "queued" | "uploading" | "done" | "error",
+  //                chunks, file }  — `file` (the actual File) is kept so a doc
+  //                queued on the setup screen can be uploaded later, once the
+  //                company is confirmed ingested (see flushQueuedUploads).
+  const [uploadedDocs, setUploadedDocs] = useState([]);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef(null);
+
   const endRef = useRef(null);
   const controllerRef = useRef(null);
 
@@ -250,12 +308,33 @@ export default function Debate() {
     // divider automatically once the new round's first turn streams in.
     setStatus("running");
 
+    // Queued setup-screen docs, captured at stream start. They are uploaded only
+    // AFTER the company is confirmed ingested (ingest_complete / session_start) so
+    // they land at the engine's CURRENT ingest_version, not a stale version 0.
+    // Skipped for follow-up rounds (those upload immediately — already ingested).
+    const queuedAtStart = continuation
+      ? []
+      : uploadedDocs.filter((d) => d.status === "queued" && d.file);
+    let queuedFlushStarted = false;
+    const flushQueuedUploads = () => {
+      if (queuedFlushStarted || queuedAtStart.length === 0) return;
+      queuedFlushStarted = true;
+      (async () => {
+        for (const d of queuedAtStart) {
+          // queued → uploading → done, keyed by filename (replaces the pill).
+          await uploadDocument(d.file);
+        }
+      })();
+    };
+
     const handle = (evt) => {
       if (controller.signal.aborted || !evt || !evt.type) return;
       switch (evt.type) {
         case "session_start":
           setSessionId(evt.session_id ?? evt.sessionId ?? null);
           setStatus("running");
+          // Company already ingested (no ingest phase) → upload queued docs now.
+          flushQueuedUploads();
           break;
         case "ingest_start":
           setStatus("ingesting");
@@ -268,6 +347,9 @@ export default function Debate() {
           break;
         case "ingest_complete":
           setStatus("running"); // debate is about to start
+          // Auto-ingest just finished → the company is now at its current
+          // ingest_version; upload queued docs so they land at THAT version.
+          flushQueuedUploads();
           break;
         case "turn_start":
           setStatus("running");
@@ -279,6 +361,7 @@ export default function Debate() {
               turn: evt.turn,
               response: "",
               complete: false,
+              sources: [],
             },
           ]);
           break;
@@ -319,6 +402,26 @@ export default function Debate() {
                 complete: true,
                 response: evt.response ?? last.response,
               };
+            }
+            return updated;
+          });
+          break;
+        case "sources":
+          // Attach retrieved sources to the matching agent turn (agent + turn
+          // number). Search newest-first so the turn currently streaming wins.
+          setTurns((prev) => {
+            const updated = [...prev];
+            for (let i = updated.length - 1; i >= 0; i--) {
+              const t = updated[i];
+              if (
+                !t.isRoundHeader &&
+                !t.isSystem &&
+                t.agent === evt.agent &&
+                t.turn === evt.turn
+              ) {
+                updated[i] = { ...t, sources: evt.sources ?? [] };
+                break;
+              }
             }
             return updated;
           });
@@ -430,6 +533,84 @@ export default function Debate() {
       { continuation: true }
     );
   };
+
+  // ── research-document upload ───────────────────────────────────────────
+  // Upload a single file immediately: POST multipart to the backend, which
+  // extracts → chunks → embeds → stores it into the company's knowledge base so
+  // the next debate round can cite it. Pill status is tracked per filename.
+  const uploadDocument = async (fileObj) => {
+    const filename = fileObj.name;
+    setUploadedDocs((prev) => [
+      ...prev.filter((d) => d.filename !== filename),
+      { filename, status: "uploading", chunks: 0, file: fileObj },
+    ]);
+    setUploading(true);
+    try {
+      const form = new FormData();
+      form.append("file", fileObj);
+      form.append("ticker", symbol);
+      form.append("company", company);
+      const res = await fetch(`${API}/company/${symbol}/upload-document`, {
+        method: "POST",
+        body: form,
+      });
+      if (!res.ok) {
+        let msg = `Upload failed (${res.status})`;
+        try {
+          const j = await res.json();
+          if (j?.detail) msg = j.detail;
+        } catch {
+          /* non-JSON error body — keep the status-code message */
+        }
+        throw new Error(msg);
+      }
+      const data = await res.json();
+      setUploadedDocs((prev) =>
+        prev.map((d) =>
+          d.filename === filename
+            ? { ...d, status: "done", chunks: data.chunks_added ?? 0 }
+            : d
+        )
+      );
+    } catch (err) {
+      setUploadedDocs((prev) =>
+        prev.map((d) =>
+          d.filename === filename
+            ? { ...d, status: "error", error: err?.message || "Upload failed" }
+            : d
+        )
+      );
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  // Handle chosen/dropped files. On the setup screen we QUEUE them (defer the
+  // upload until the company is confirmed ingested, so docs land at the engine's
+  // current ingest_version — not a stale version 0). Everywhere else (the
+  // follow-up card) the company is already ingested, so upload immediately. Each
+  // upload runs independently so one failure doesn't block the rest.
+  const handleFiles = (fileList) => {
+    const files = Array.from(fileList || []);
+    if (status === "idle") {
+      setUploadedDocs((prev) => {
+        const next = [...prev];
+        for (const f of files) {
+          const entry = { filename: f.name, status: "queued", chunks: 0, file: f };
+          const i = next.findIndex((d) => d.filename === f.name);
+          if (i >= 0) next[i] = entry;
+          else next.push(entry);
+        }
+        return next;
+      });
+    } else {
+      files.forEach((f) => uploadDocument(f));
+    }
+  };
+
+  // Remove a pill from the UI list (does not delete the stored chunks).
+  const removeDoc = (filename) =>
+    setUploadedDocs((prev) => prev.filter((d) => d.filename !== filename));
 
   // Resume mode — fetch the saved session and rebuild the transcript, then drop
   // straight into the "complete" state (with the follow-up box) so the user can
@@ -642,6 +823,89 @@ export default function Debate() {
             Start Debate →
           </button>
 
+          {/* RESEARCH DOCUMENTS — optional user uploads fed into the debate */}
+          {status === "idle" && (
+            <div className="mt-7">
+              <div className="text-[11px] font-semibold uppercase tracking-[1.5px] text-tikt-gold">
+                Research Documents
+              </div>
+              <div
+                role="button"
+                tabIndex={0}
+                onClick={() => fileInputRef.current?.click()}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ")
+                    fileInputRef.current?.click();
+                }}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  handleFiles(e.dataTransfer.files);
+                }}
+                className="mt-2 cursor-pointer rounded-lg border-[1.5px] border-dashed border-tikt-gold/50 bg-tikt-cream px-5 py-6 text-center transition hover:border-tikt-gold"
+              >
+                <div className="text-[13px] text-tikt-green/50">
+                  Drop files or click to upload
+                </div>
+                <div className="mt-1 text-[11px] text-tikt-green/40">
+                  PDF, TXT, MD, or DOCX
+                </div>
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".pdf,.txt,.md,.docx"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  handleFiles(e.target.files);
+                  e.target.value = "";
+                }}
+              />
+              {uploadedDocs.length > 0 && (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {uploadedDocs.map((d) => (
+                    <span
+                      key={d.filename}
+                      className="inline-flex items-center gap-2 rounded-full border-[0.5px] border-tikt-green/15 bg-white px-3 py-1.5 text-[12px] text-tikt-green"
+                    >
+                      {d.status === "queued" && (
+                        <span className="text-tikt-gold">⏳</span>
+                      )}
+                      {d.status === "uploading" && (
+                        <span className="animate-pulse text-tikt-gold">⟳</span>
+                      )}
+                      {d.status === "done" && (
+                        <span className="text-tikt-pos">✓</span>
+                      )}
+                      {d.status === "error" && (
+                        <span className="text-tikt-neg">!</span>
+                      )}
+                      <span className={d.status === "uploading" ? "animate-pulse" : ""}>
+                        {d.status === "uploading"
+                          ? `Uploading ${d.filename}…`
+                          : d.filename}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => removeDoc(d.filename)}
+                        className="text-tikt-green/40 hover:text-tikt-neg"
+                        aria-label={`Remove ${d.filename}`}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              {uploadedDocs.some((d) => d.status === "queued") && (
+                <div className="mt-2 text-[11px] italic text-tikt-green/40">
+                  Will upload when debate starts
+                </div>
+              )}
+            </div>
+          )}
+
           {/* INGEST PROGRESS */}
           {status === "ingesting" && (
             <div className="mt-8 rounded-lg border-[1.5px] border-tikt-gold bg-white p-6">
@@ -845,6 +1109,12 @@ export default function Debate() {
                         <div className="mt-1">
                           {renderResponse(t.response, !t.complete)}
                         </div>
+                        {/* retrieved sources — completed agent turns only */}
+                        {!isSynthesis &&
+                          t.complete &&
+                          (t.sources?.length ?? 0) > 0 && (
+                            <SourcesSection sources={t.sources} />
+                          )}
                       </div>
                     </div>
                   </Fragment>
@@ -885,6 +1155,49 @@ export default function Debate() {
               >
                 Continue Debate →
               </button>
+
+              {/* secondary: add a research document to the next round */}
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="mt-3 text-[12px] font-medium text-tikt-gold hover:text-tikt-goldHover"
+              >
+                + Add research document
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".pdf,.txt,.md,.docx"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  handleFiles(e.target.files);
+                  e.target.value = "";
+                }}
+              />
+              {uploadedDocs.length > 0 && (
+                <div className="mt-2 flex flex-col gap-1">
+                  {uploadedDocs.map((d) => (
+                    <div key={d.filename} className="text-[12px]">
+                      {d.status === "uploading" && (
+                        <span className="animate-pulse text-tikt-gold/70">
+                          Uploading {d.filename}…
+                        </span>
+                      )}
+                      {d.status === "done" && (
+                        <span className="text-tikt-gold/70">
+                          {d.filename} added to research context
+                        </span>
+                      )}
+                      {d.status === "error" && (
+                        <span className="text-tikt-neg">
+                          {d.filename} failed to upload
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 

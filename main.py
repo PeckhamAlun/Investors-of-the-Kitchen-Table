@@ -193,12 +193,25 @@ def load_system_prompt(agent: str) -> str:
     return open(path, encoding="utf-8").read().strip()
 
 
+# Memoise retrieval per (query, agent, company, intent) for the lifetime of the
+# process. Retrieval is otherwise non-deterministic — build_expansions() makes a
+# live Claude call to generate the search queries — so without this the assembled
+# context string changes every turn and the cache_control breakpoint on it (see
+# _build_agent_message) would never hit. Restart the process after re-ingesting
+# data so the cache does not serve a stale snapshot.
+_RETRIEVAL_CACHE: dict = {}
+
+
 def retrieve_records(
     query: str,
     agent: str,
     company: str | None,
     intent: str = "general",
 ) -> tuple[list[dict], list[str]]:
+    cache_key = (query, agent, company, intent)
+    if cache_key in _RETRIEVAL_CACHE:
+        return _RETRIEVAL_CACHE[cache_key]
+
     expansions = build_expansions(query, intent, company)
 
     # Pin company retrieval to the LATEST ingest only — historical versions stay
@@ -280,6 +293,7 @@ def retrieve_records(
                     "doc": doc.get("text", ""),
                 })
 
+    _RETRIEVAL_CACHE[cache_key] = (records, expansions)
     return records, expansions
 
 
@@ -1229,8 +1243,17 @@ def _build_agent_message(
     agents: list[str],
     intent: str,
     audit: bool = False,
-) -> str:
-    """Construct an agent's per-turn user message exactly as agent_node() does."""
+) -> list[dict]:
+    """Construct an agent's per-turn user message as a list of content blocks.
+
+    Block 1 (topic + company + retrieved context) is byte-identical across every
+    turn the agent takes in a round — retrieval is memoised per
+    (topic, agent, company, intent) — so it carries cache_control and sits FIRST,
+    ahead of the volatile session history. That makes [system + block 1] a stable
+    cached prefix Anthropic serves at ~0.1x on the agent's later turns. Diverges
+    from agent_node() (the CLI path) on purpose: the CLI keeps context after the
+    history; only this streamed path reorders it for caching.
+    """
     context = retrieve_context(topic, agent, company, intent=intent, audit=audit)
 
     # Full session history — agents see everything from all rounds
@@ -1245,13 +1268,12 @@ def _build_agent_message(
     other_names = " and ".join(display_name(a) for a in others)
 
     if not history:
-        header = f"""Topic for debate: {topic}
+        context_block = f"""Topic for debate: {topic}
         {f'Company under discussion: {company}' if company else ''}
 
         Relevant context from your research and knowledge base:
-        {context if context else '[No specific context retrieved — draw on your frameworks]'}
-
-        YOUR CONTEXT:
+        {context if context else '[No specific context retrieved — draw on your frameworks]'}"""
+        body = """YOUR CONTEXT:
         You are presenting as yourself — your own frameworks, your own voice,
         your own convictions — in a structured investment debate with other
         serious investors. Treat this as a high-stakes internal research
@@ -1279,14 +1301,13 @@ def _build_agent_message(
 
         No long paragraphs. No analogies. No biography. If you can't say it in a bullet, it's not sharp enough yet."""
     else:
-        header = f"""Topic: {topic}
+        context_block = f"""Topic: {topic}
         {f'Company: {company}' if company else ''}
 
-        Full session history — all prior rounds and arguments:
-        {history_text}
-
         Relevant context from your research:
-        {context if context else '[No specific context retrieved — draw on your frameworks]'}
+        {context if context else '[No specific context retrieved — draw on your frameworks]'}"""
+        body = f"""Full session history — all prior rounds and arguments:
+        {history_text}
 
         Respond to the arguments made so far by {other_names}. You may challenge a specific point, build on an argument, introduce a new angle, or connect this topic to what was already established in earlier rounds."""
         footer = """
@@ -1352,7 +1373,16 @@ def _build_agent_message(
            - What is SBC as % of revenue for the trailing four quarters?
            - What is net revenue retention rate — has it crossed below 115%?"""
 
-    return header + shared + footer
+    # Two content blocks: the stable context (cached) first, the volatile
+    # per-turn material (history + instructions) second. See the docstring.
+    return [
+        {
+            "type": "text",
+            "text": context_block,
+            "cache_control": {"type": "ephemeral"},
+        },
+        {"type": "text", "text": body + shared + footer},
+    ]
 
 
 def _build_synthesis_prompt(
@@ -1417,6 +1447,10 @@ async def stream_debate_round(
         name          = display_name(agent)
         system_prompt = load_system_prompt(agent)
         user_message  = _build_agent_message(agent, topic, company, history, agents, intent, audit)
+        # Same memoised retrieval _build_agent_message() built its context from
+        # (cache key: topic/agent/company/intent) — pulled here only to report
+        # which chunks the agent saw, via the 'sources' event after turn_end.
+        records, _    = retrieve_records(topic, agent, company, intent)
 
         yield {"type": "turn_start", "agent": agent, "display_name": name, "turn": turn}
 
@@ -1427,7 +1461,11 @@ async def stream_debate_round(
                 with anthropic_client.messages.stream(
                     model=CLAUDE_MODEL,
                     max_tokens=DEBATE_MAX_TOKENS,
-                    system=system_prompt,
+                    system=[{
+                        "type": "text",
+                        "text": system_prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }],
                     messages=[{"role": "user", "content": user_message}],
                 ) as stream:
                     for text in stream.text_stream:
@@ -1451,6 +1489,15 @@ async def stream_debate_round(
             "response": reply,
         }]
         yield {"type": "turn_end", "agent": agent, "turn": turn, "response": reply}
+        yield {
+            "type": "sources",
+            "agent": agent,
+            "turn": turn,
+            "sources": [
+                {"source": r["source"], "collection": r["collection"]}
+                for r in records
+            ],
+        }
 
     # ── Synthesis ──
     yield {"type": "synthesis_start"}

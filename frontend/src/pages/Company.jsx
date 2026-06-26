@@ -73,6 +73,31 @@ function moneyTone(value) {
     : "text-tikt-green";
 }
 
+// Company logo — circular FMP logo on white; falls back to the ticker's first
+// two characters (gold on dark green) when there is no logo URL or the image
+// fails to load.
+function CompanyLogo({ logo, name, ticker }) {
+  const [errored, setErrored] = useState(false);
+  const initials = (ticker || "").slice(0, 2).toUpperCase();
+
+  if (!logo || errored) {
+    return (
+      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-tikt-green/15 bg-tikt-green text-[15px] font-bold tracking-[0.5px] text-tikt-gold">
+        {initials}
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={logo}
+      alt={name || ticker}
+      onError={() => setErrored(true)}
+      className="h-12 w-12 shrink-0 rounded-full border border-tikt-green/15 bg-white object-contain p-1"
+    />
+  );
+}
+
 export default function Company() {
   const { ticker } = useParams();
   const navigate = useNavigate();
@@ -260,23 +285,31 @@ export default function Company() {
             <>
               {/* ───────────── COMPANY HEADER ───────────── */}
               <div className="flex items-start justify-between gap-6">
-                <div>
-                  <div className="text-[11px] font-semibold uppercase tracking-[2px] text-tikt-gold">
-                    {profile?.exchange ? `${profile.exchange} · ${symbol}` : symbol}
-                  </div>
-                  <h1 className="mt-1.5 font-display text-[28px] font-bold leading-tight text-tikt-green">
-                    {loading.profile ? (
-                      <span className="text-tikt-green/50">Loading…</span>
-                    ) : (
-                      profile?.name || symbol
-                    )}
-                  </h1>
-                  <div className="mt-1 text-[13px] text-tikt-green/50">
-                    {loading.profile
-                      ? ""
-                      : [profile?.sector, profile?.industry]
-                          .filter(Boolean)
-                          .join(" · ") || "—"}
+                <div className="flex items-center gap-4">
+                  <CompanyLogo
+                    key={symbol}
+                    logo={profile?.logo}
+                    name={profile?.name}
+                    ticker={symbol}
+                  />
+                  <div>
+                    <div className="text-[11px] font-semibold uppercase tracking-[2px] text-tikt-gold">
+                      {profile?.exchange ? `${profile.exchange} · ${symbol}` : symbol}
+                    </div>
+                    <h1 className="mt-1.5 font-display text-[28px] font-bold leading-tight text-tikt-green">
+                      {loading.profile ? (
+                        <span className="text-tikt-green/50">Loading…</span>
+                      ) : (
+                        profile?.name || symbol
+                      )}
+                    </h1>
+                    <div className="mt-1 text-[13px] text-tikt-green/50">
+                      {loading.profile
+                        ? ""
+                        : [profile?.sector, profile?.industry]
+                            .filter(Boolean)
+                            .join(" · ") || "—"}
+                    </div>
                   </div>
                 </div>
 

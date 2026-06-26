@@ -3,3 +3,11 @@ uvicorn
 python-dotenv
 httpx
 python-dateutil
+
+# --- Document upload (POST /company/{ticker}/upload-document) ---
+python-multipart      # FastAPI multipart/form-data parsing (file uploads)
+python-docx           # .docx text extraction
+pypdf                 # .pdf text extraction
+langchain-text-splitters  # RecursiveCharacterTextSplitter chunking
+google-genai          # Gemini embeddings for uploaded-doc chunks
+pymongo               # company_financials storage (Atlas)

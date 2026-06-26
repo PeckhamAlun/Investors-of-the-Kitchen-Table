@@ -10,7 +10,9 @@ the /debate endpoint — e.g. wrap the LangGraph debate / run_round() so a POST 
 result back to the frontend.
 """
 
+import io
 import os
+import re
 import sys
 import time
 import json
@@ -19,7 +21,7 @@ import asyncio
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -636,6 +638,155 @@ async def company_statements(
 
     cache_set(key, result)
     return result
+
+
+# ==============================================================================
+# DOCUMENT UPLOAD — POST /company/{ticker}/upload-document
+# ==============================================================================
+# Lets a user feed their own research (PDF / TXT / MD / DOCX) into a company's
+# knowledge base. The extracted text is chunked, embedded with the same Gemini
+# model as analyse_company.py, and written into the shared `company_financials`
+# collection at the company's LATEST ingest_version — so the debate engine's
+# full-context dump (which pins to that version) picks it up on the next round.
+
+ALLOWED_DOC_EXTS = {".pdf", ".txt", ".md", ".docx"}
+
+
+def _strip_company_suffix(name: str) -> str:
+    # Mirror scripts/analyse_company.py's company-key derivation so an uploaded
+    # doc lands under the SAME company key the auto-ingest would produce.
+    clean = re.sub(
+        r",?\s+(inc\.?|incorporated|corp\.?|corporation|co\.?|ltd\.?|plc|holdings|group)\b",
+        "", name or "", flags=re.IGNORECASE,
+    )
+    return clean.strip().rstrip(".,").strip()
+
+
+def _extract_text(filename: str, data: bytes) -> str:
+    """Extract plain text from an uploaded file by extension. PDF via pypdf
+    (page by page), DOCX via python-docx (paragraphs), TXT/MD decoded directly."""
+    ext = os.path.splitext(filename)[1].lower()
+    if ext in (".txt", ".md"):
+        return data.decode("utf-8", errors="ignore")
+    if ext == ".pdf":
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(data))
+        return "\n".join((page.extract_text() or "") for page in reader.pages)
+    if ext == ".docx":
+        import docx
+        document = docx.Document(io.BytesIO(data))
+        return "\n".join(p.text for p in document.paragraphs)
+    return ""
+
+
+@app.post("/company/{ticker}/upload-document")
+async def upload_document(
+    ticker: str,
+    file: UploadFile = File(...),
+    company: str = Form(""),
+):
+    filename = file.filename or "document"
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in ALLOWED_DOC_EXTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '{ext}'. Allowed: PDF, TXT, MD, DOCX.",
+        )
+
+    # Make the project root importable (config + scripts.analyse_company) without
+    # loading the debate engine. Mirrors scripts/analyse_company.py's path insert.
+    # Importing `scripts.analyse_company`/`config` is safe — only a bare
+    # `import main` would clash with this backend's own `main` module.
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from config import normalize_company, GEMINI_EMBED_MODEL, GOOGLE_API_KEY
+    from scripts.analyse_company import get_latest_ingest_version
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+    try:
+        text = _extract_text(filename, await file.read())
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read {filename}: {e}")
+    if not text.strip():
+        raise HTTPException(
+            status_code=400, detail=f"No extractable text found in {filename}."
+        )
+
+    # Chunk ~1500 chars with 200 overlap (paragraph -> sentence -> word splits).
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1500, chunk_overlap=200, separators=["\n\n", "\n", ". ", " "]
+    )
+    chunks = [c for c in splitter.split_text(text) if c.strip()]
+    if not chunks:
+        raise HTTPException(
+            status_code=400, detail=f"{filename} produced no usable text chunks."
+        )
+
+    # Resolve the company key — exact by ticker, else derived from the display
+    # name (same derivation as analyse_company), else the ticker itself.
+    ticker_u = ticker.upper()
+    company_key = (
+        get_company_key_by_ticker(ticker_u)
+        or normalize_company(_strip_company_suffix(company))
+        or ticker_u
+    )
+
+    # Store at the SAME latest ingest_version as the existing company data, so the
+    # engine's version-pinned full dump includes these chunks (0 if never ingested).
+    _, latest_version = get_latest_ingest_version(company_key)
+
+    # Embed each chunk with Gemini (same model / vector space as analyse_company).
+    if not GOOGLE_API_KEY:
+        raise HTTPException(status_code=500, detail="GOOGLE_API_KEY is not configured.")
+    try:
+        from google import genai
+        gem = genai.Client(api_key=GOOGLE_API_KEY)
+        embeddings = [
+            list(
+                gem.models.embed_content(
+                    model=GEMINI_EMBED_MODEL, contents=c
+                ).embeddings[0].values
+            )
+            for c in chunks
+        ]
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Embedding failed: {e}")
+
+    # Write into company_financials. _id is version-scoped + filename-scoped so a
+    # re-upload of the same file overwrites rather than duplicates.
+    try:
+        col = get_mongo_db()["company_financials"]
+        now = datetime.now(timezone.utc).isoformat()
+        for n, (chunk, emb) in enumerate(zip(chunks, embeddings)):
+            safe = re.sub(
+                r"[^a-zA-Z0-9]", "_", f"{ticker_u}_user_upload_{filename}_{n}"
+            )[:80]
+            doc_id = f"{safe}_v{latest_version}"
+            col.replace_one(
+                {"_id": doc_id},
+                {
+                    "_id": doc_id,
+                    "text": chunk,
+                    "company": company_key,
+                    "ticker": ticker_u,
+                    "source": filename,
+                    "source_type": "user_document",
+                    "form_type": "user_upload",
+                    "period": "current",
+                    "ingest_version": latest_version,
+                    "uploaded_at": now,
+                    "filename": filename,
+                    "embedding": emb,
+                },
+                upsert=True,
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not store document: {e}")
+
+    return {"success": True, "chunks_added": len(chunks), "filename": filename}
 
 
 class DebateRequest(BaseModel):
