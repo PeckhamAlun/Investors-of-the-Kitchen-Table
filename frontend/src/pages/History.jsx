@@ -69,6 +69,8 @@ export default function History() {
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  const [confirmId, setConfirmId] = useState(null);
+  const [deleteError, setDeleteError] = useState(null);
 
   useEffect(() => {
     fetch(`${API}/debates`)
@@ -85,6 +87,24 @@ export default function History() {
         setLoading(false);
       });
   }, []);
+
+  // Delete a saved debate after explicit confirmation, then drop it from local
+  // state so the card disappears immediately. A failed request surfaces a brief
+  // inline error on that card.
+  const handleDelete = async (sessionId) => {
+    try {
+      const res = await fetch(`${API}/debate/${encodeURIComponent(sessionId)}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) throw new Error("delete failed");
+      setHistory((prev) => prev.filter((x) => x.session_id !== sessionId));
+      setConfirmId(null);
+      setDeleteError(null);
+    } catch {
+      setConfirmId(null);
+      setDeleteError(sessionId);
+    }
+  };
 
   const groups = groupByTicker(history);
 
@@ -145,9 +165,61 @@ export default function History() {
                               },
                             })
                           }
-                          className="cursor-pointer rounded-lg border-[0.5px] border-tikt-green/15 bg-white p-4 transition hover:border-tikt-gold hover:shadow-[0_8px_22px_rgba(64,52,24,0.08)]"
+                          className="group relative cursor-pointer rounded-lg border-[0.5px] border-tikt-green/15 bg-white p-4 transition hover:border-tikt-gold hover:shadow-[0_8px_22px_rgba(64,52,24,0.08)]"
                         >
-                          <div className="flex items-start justify-between gap-4">
+                          {/* delete control — hover-reveal trash (×) with a confirm step */}
+                          <div
+                            className="absolute right-2 top-2 z-10"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            {confirmId === d.session_id ? (
+                              <div className="flex items-center gap-2 rounded-md border-[0.5px] border-tikt-green/15 bg-white px-2.5 py-1.5 shadow-[0_8px_22px_rgba(64,52,24,0.12)]">
+                                <span className="text-[12px] text-tikt-green">
+                                  Delete this debate?
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleDelete(d.session_id);
+                                  }}
+                                  className="text-[12px] font-semibold text-red-600 hover:text-red-700"
+                                >
+                                  Delete
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setConfirmId(null);
+                                  }}
+                                  className="text-[12px] font-medium text-tikt-muted hover:text-tikt-green"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            ) : deleteError === d.session_id ? (
+                              <span className="rounded-md bg-red-50 px-2 py-1 text-[11px] font-medium text-red-600">
+                                Could not delete. Try again.
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                aria-label="Delete debate"
+                                title="Delete debate"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setDeleteError(null);
+                                  setConfirmId(d.session_id);
+                                }}
+                                className="flex h-6 w-6 items-center justify-center rounded-full text-[18px] leading-none text-red-500 opacity-0 transition hover:bg-red-50 hover:text-red-600 group-hover:opacity-100"
+                              >
+                                ×
+                              </button>
+                            )}
+                          </div>
+
+                          <div className="flex items-start justify-between gap-4 pr-7">
                             <div className="text-[15px] font-medium leading-snug text-tikt-green">
                               {d.topic ||
                                 `Is ${d.ticker} a good investment?`}

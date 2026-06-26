@@ -1005,6 +1005,16 @@ async def get_debate(session_id: str):
     return doc
 
 
+@app.delete("/debate/{session_id}")
+async def delete_debate(session_id: str):
+    db = get_mongo_db()
+    result = db["debates"].delete_one({"session_id": session_id})
+    if result.deleted_count == 0:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Debate not found")
+    return {"success": True, "session_id": session_id}
+
+
 @app.get("/debates")
 async def list_all_debates():
     db = get_mongo_db()
