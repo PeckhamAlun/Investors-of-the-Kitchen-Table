@@ -58,7 +58,7 @@ from scripts.analyse_company import get_latest_ingest_version
 
 DEFAULT_AGENTS      = ["buffett", "cathie_wood"]
 DEFAULT_TURNS       = 2
-MAX_CONTEXT_CHARS   = 8000
+MAX_CONTEXT_CHARS   = 24000
 DEBATE_MAX_TOKENS   = 1200
 
 
@@ -200,7 +200,6 @@ def retrieve_records(
     intent: str = "general",
 ) -> tuple[list[dict], list[str]]:
     expansions = build_expansions(query, intent, company)
-    comp_results_per_query = 3 if intent in ("financials", "growth") else 2
 
     # Pin company retrieval to the LATEST ingest only — historical versions stay
     # in the collection but agents never see stale data. Computed once per call.
@@ -258,40 +257,28 @@ def retrieve_records(
                     "doc": doc.get("text", ""),
                 })
 
-        # Query company financials
-        if company:
-            comp_col = db[COMPANY_COLLECTION]
-            comp_results = comp_col.aggregate([
-                {
-                    "$vectorSearch": {
-                        "index": "vector_index",
-                        "path": "embedding",
-                        "queryVector": embedding,
-                        "numCandidates": 50,
-                        "limit": comp_results_per_query,
-                        "filter": company_filter
-                    }
-                },
-                {
-                    "$project": {
-                        "text": 1,
-                        "source": 1,
-                        "company": 1,
-                        "score": {"$meta": "vectorSearchScore"}
-                    }
-                }
-            ])
+    # ── Company financials: FULL CONTEXT DUMP (no vector search) ──
+    # Earnings transcripts bury important details that are not semantically close
+    # to the query, so semantic top-k can silently drop them. Instead pull EVERY
+    # chunk for this company at the latest ingest version, most recent first.
+    # The embedding field is projected out — we never use it here and it is large.
+    if company:
+        comp_col = db[COMPANY_COLLECTION]
+        comp_results = comp_col.find(
+            company_filter,
+            {"text": 1, "source": 1, "company": 1},
+        ).sort("period", -1)
 
-            for doc in comp_results:
-                doc_id = str(doc["_id"])
-                if doc_id not in seen_ids:
-                    seen_ids.add(doc_id)
-                    records.append({
-                        "collection": "company",
-                        "source": doc.get("source", f"{company} financials"),
-                        "filename": doc.get("source", ""),
-                        "doc": doc.get("text", ""),
-                    })
+        for doc in comp_results:
+            doc_id = str(doc["_id"])
+            if doc_id not in seen_ids:
+                seen_ids.add(doc_id)
+                records.append({
+                    "collection": "company",
+                    "source": doc.get("source", f"{company} financials"),
+                    "filename": doc.get("source", ""),
+                    "doc": doc.get("text", ""),
+                })
 
     return records, expansions
 
