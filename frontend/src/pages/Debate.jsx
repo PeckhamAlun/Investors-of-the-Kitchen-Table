@@ -10,7 +10,7 @@ import { useLocation, useNavigate, useParams } from "react-router-dom";
 //     transcript panel + 30% session sidebar — streamed token-by-token over SSE.
 // Editorial TIKT look throughout: cream page, Playfair headings, gold accents.
 
-const API = "http://localhost:8000";
+const API = "https://investors-of-the-kitchen-table-production.up.railway.app";
 
 // Default roster (all selected on first render).
 const DEFAULT_AGENTS = [

@@ -9,7 +9,7 @@ import Sidebar from "../components/TickerBar";
 // the backend /statements endpoint returns raw FMP rows (+ a periodLabel), and we
 // map field keys → rows dynamically (oldest period left, newest right).
 
-const API = "http://localhost:8000";
+const API = "https://investors-of-the-kitchen-table-production.up.railway.app";
 
 const TABS = [
   { k: "income", label: "Income Statement" },

@@ -9,7 +9,7 @@
 
 import { useEffect, useState } from "react";
 
-const API = "http://localhost:8000";
+const API = "https://investors-of-the-kitchen-table-production.up.railway.app";
 
 // Hardcoded placeholders — shown immediately on first paint, then replaced by the
 // live /market-data response. Shape matches the endpoint: { name, price, change }.

@@ -17,7 +17,7 @@ import Sidebar from "../components/TickerBar";
 // table are all loaded live from the FastAPI backend; each section loads
 // independently so the page shell renders immediately.
 
-const API = "http://localhost:8000";
+const API = "https://investors-of-the-kitchen-table-production.up.railway.app";
 
 const RANGES = ["1W", "1M", "YTD", "1Y", "3Y", "5Y", "10Y", "Max"];
 

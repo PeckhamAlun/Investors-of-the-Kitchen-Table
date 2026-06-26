@@ -9,7 +9,7 @@ import { useEffect, useRef, useState } from "react";
 // tickers. Selecting a result (click, or Enter on a highlighted row) calls
 // onSearch with that symbol; plain Enter / the button submit the typed text.
 
-const API = "http://localhost:8000";
+const API = "https://investors-of-the-kitchen-table-production.up.railway.app";
 
 export default function SearchBar({ onSearch }) {
   const [inputValue, setInputValue] = useState("");

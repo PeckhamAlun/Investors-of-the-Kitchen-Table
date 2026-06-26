@@ -8,7 +8,7 @@ import Sidebar from "../components/TickerBar";
 // /debate/:ticker with { resume: true, session_id } in router state, and Debate.jsx
 // rebuilds the full transcript from stored history.
 
-const API = "http://localhost:8000";
+const API = "https://investors-of-the-kitchen-table-production.up.railway.app";
 
 // Known agent id → display name (mirrors Debate.jsx). Unknown ids title-case.
 const AGENT_NAMES = {
