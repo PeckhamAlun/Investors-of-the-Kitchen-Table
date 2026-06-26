@@ -13,7 +13,7 @@ investors — Warren Buffett, Cathie Wood, Peter Lynch (Charlie Munger planned) 
 around a virtual table and runs a **structured, multi-round debate** about a
 specific stock.
 
-- Each investor is an **agent** with their own **RAG brain**: a ChromaDB
+- Each investor is an **agent** with their own **RAG brain**: a MongoDB Atlas
   collection built from that investor's letters, books, lectures, and interview
   transcripts. The agent argues *in their own voice*, grounded in their own
   retrieved philosophy — not a generic LLM persona.
@@ -40,19 +40,26 @@ for fast, multi-perspective stock analysis.
   ```powershell
   .\.venv\Scripts\Activate.ps1
   ```
-- **ChromaDB** — local persistent vector store at `./chroma_db/`. No server, no
-  network; persists across sessions.
-- **Embedding model:** `all-MiniLM-L6-v2` (384-dim, local via
-  `sentence-transformers`, free, no API). Cosine space (`hnsw:space: cosine`).
+- **MongoDB Atlas** — cloud vector store via `pymongo`, database `kitchen_table`.
+  Each collection carries an Atlas **Vector Search** index named `vector_index` on
+  the `embedding` path (3072-dim, cosine). Retrieval is the `$vectorSearch`
+  aggregation stage, scoped per agent/company with a `filter` on metadata. Needs
+  network + a connection string (no local DB file).
+- **Embedding model:** Gemini `gemini-embedding-001` (3072-dim) via the
+  `google-genai` SDK — remote API, needs `GOOGLE_API_KEY`. Replaced the original
+  local `all-MiniLM-L6-v2` (384-dim); the ChromaDB/MiniLM era is retired (see §13).
 - **LLM:** `claude-sonnet-4-6` via the Anthropic API (`anthropic` SDK).
 - **LangGraph** — debate orchestration / multi-agent state.
 - **ReportLab** — PDF generation.
-- **API keys** stored in `.env` file in project root — copy `.env.example` to
-  `.env` and fill in your keys. Never commit `.env`. (`config.py` calls
-  `load_dotenv()` at import time, so every script picks them up automatically.)
-- Optional/aux deps: `pdfplumber` (PDF text), `langchain-text-splitters`
-  (chunking), `yt-dlp` + `openai-whisper` + `ffmpeg` (YouTube ingest),
-  `umap-learn` + `plotly` (DB visualiser).
+- **API keys / secrets** stored in `.env` file in project root — copy
+  `.env.example` to `.env` and fill in your keys. Never commit `.env`. (`config.py`
+  calls `load_dotenv()` at import time, so every script picks them up
+  automatically.) Required keys: **`MONGODB_URI`** (Atlas connection string),
+  **`GOOGLE_API_KEY`** (Gemini embeddings), **`ANTHROPIC_API_KEY`** (Claude). No
+  FMP key — company financials now come from keyless yfinance + SEC EDGAR (see §8).
+- Optional/aux deps: `pymongo` + `google-genai` (store + embeddings), `pdfplumber`
+  (PDF text), `langchain-text-splitters` (chunking), `yfinance` (company
+  financials), `yt-dlp` + `openai-whisper` + `ffmpeg` (YouTube ingest).
 
 ---
 
@@ -63,7 +70,6 @@ Kitchen Table/
 ├── CLAUDE.md                  ← this file
 ├── config.py                  ← single source of truth: paths, models, AGENT_REGISTRY, helpers
 ├── main.py                    ← THE DEBATE ENGINE (LangGraph orchestration + PDF output)
-├── query.py                   ← single-agent Q&A interface (ask one agent, no debate)
 ├── youtube_processor.py       ← legacy YouTube helper (referenced by older flows)
 ├── urls.txt                   ← scratch/root URL list
 ├── cookies.txt                ← exported YouTube cookies (for yt-dlp bot gate)
@@ -77,10 +83,10 @@ Kitchen Table/
 │   │       ├── buffett_letters.txt
 │   │       └── buffett_books_raw/     ← 3 PDFs: Snowball, Tap Dancing to Work, University of Berkshire Hathaway
 │   ├── cathie_wood/
-│   │   ├── system_prompt.txt          ← (older verbose style — see §14)
-│   │   ├── urls.txt                   ← 42 YouTube URLs (source for rebuild)
+│   │   ├── system_prompt.txt          ← lean, RAG-driven (§16 standard)
+│   │   ├── urls.txt                   ← 42 YouTube URLs (source for the rebuild)
 │   │   └── philosophy/
-│   │       └── transcripts/           ← ~21 transcript .txt files + manifest.json (collection currently EMPTY — see §4)
+│   │       └── transcripts/           ← transcript .txt files + manifest.json (ingested — 663 chunks, see §4)
 │   └── peter_lynch/
 │       ├── system_prompt.txt
 │       ├── urls.txt
@@ -90,31 +96,40 @@ Kitchen Table/
 │           └── transcripts/           ← manifest.json
 │   (no munger/ folder yet — see §4)
 │
-├── companies/                 ← raw company documents (drop PDFs here before ingesting)
-│   ├── Adobe/adobe_raw/        ← 12 quarterly PDFs (on disk; NOT currently in the DB — see §4)
-│   └── Datadog/datadog_raw/    ← 19 transcript/report/deck PDFs (currently loaded in the DB)
+├── companies/                 ← raw company PDFs (legacy --folder flow; live data now pulled by ticker — see §8)
+│   ├── Adobe/adobe_raw/        ← 12 quarterly PDFs (on disk; not in the DB)
+│   └── Datadog/datadog_raw/    ← 19 transcript/report/deck PDFs (on disk; not in the DB)
 │
-├── scripts/
-│   ├── ingest_philosophy.py   ← build an agent brain from philosophy/ (.txt + .pdf, recursive)
-│   ├── ingest_company.py      ← load a company's PDFs into company_financials
-│   ├── analyse_company.py     ← auto-ingests company financials from FMP API + SEC EDGAR by ticker symbol. Includes --audit flag to verify ingested data.
+├── scripts/                   ← ALL scripts now MongoDB Atlas + Gemini (migrated from ChromaDB)
+│   ├── ingest_philosophy.py   ← build an agent brain in MongoDB Atlas from philosophy/ (.txt + .pdf, recursive; Gemini embeddings)
+│   ├── analyse_company.py     ← auto-ingest company financials by ticker (yfinance + SEC EDGAR) into company_financials. --audit / --list / --append.
 │   ├── ingest_youtube.py      ← YouTube → transcript → agent brain (captions, Whisper fallback)
-│   ├── pull_transcripts.py    ← older batch: YouTube → Whisper → save .txt to philosophy/ (+ processed_urls.txt)
-│   ├── knowledge_audit.py     ← coverage audit across agent philosophy collections
-│   ├── audit_rag.py           ← inspect exactly what an agent retrieves for a query
-│   └── visualise_db.py        ← UMAP 2D plot of vectors → vector_visualisation.html (buffett-hardcoded)
+│   ├── audit_rag.py           ← inspect exactly what an agent retrieves for a query ($vectorSearch)
+│   ├── knowledge_audit.py     ← coverage audit across agent philosophy collections (MongoDB + Gemini)
+│   ├── query.py               ← single-agent Q&A interface (ask one agent, no debate)
+│   └── split_memo_collection.py ← split a memo anthology PDF into one PDF per memo (Howard Marks build)
 │
-├── chroma_db/                 ← the persistent vector store (do not edit by hand)
-├── outputs/                   ← generated debate PDFs (YYYYMMDD_HHMM_session.pdf) + visualiser HTML
+├── chroma_db/                 ← LEGACY ChromaDB store — no longer used (retired in the Atlas migration; kept for reference only)
+├── outputs/                   ← generated debate PDFs (YYYYMMDD_HHMM_session.pdf)
 ├── obsolete/                  ← retired scripts (ingest_buffett.py, ingest_books.py, query_buffett.py, …)
+│   └── scripts/               ← the ChromaDB-era versions of the migrated tools (ingest_company.py, pull_transcripts.py, visualise_db.py, + the old ChromaDB ingest/audit/query/analyse)
 └── _yt_temp/                  ← scratch dir for yt-dlp audio (auto-cleaned)
 ```
 
+> **Migration note:** the active scripts in `scripts/` are the MongoDB Atlas +
+> Gemini rewrites. They were developed under a temporary `migration/` folder, then
+> promoted to `scripts/` once verified; the original ChromaDB + all-MiniLM versions
+> were moved to `obsolete/scripts/`. The `migration/` folder no longer exists.
+
 ---
 
-## 4. CURRENT STATE (as of 2026-05-31)
+## 4. CURRENT STATE (as of 2026-06-12)
 
-**Live ChromaDB collections** (verified):
+**Live database: MongoDB Atlas** (`kitchen_table`). Every collection has a
+`vector_index` Atlas Vector Search index on `embedding` (3072-dim, cosine), built
+with Gemini `gemini-embedding-001`. Chunk counts below carry over from the source
+corpora (chunking is unchanged by the embedding swap); verify live counts anytime
+with the §10 command.
 
 | Collection | Chunks | Status |
 |---|---|---|
@@ -122,8 +137,8 @@ Kitchen Table/
 | `howard_marks_philosophy` | 4,548 | ✅ active (166 sources) |
 | `ray_dalio_philosophy` | 2,645 | ✅ active |
 | `peter_lynch_philosophy` | 1,038 | ✅ active |
-| `cathie_wood_philosophy` | ~442 → growing | 🔄 **REBUILDING** (YouTube bulk ingest in progress) |
-| `company_financials` | ~33 | ✅ **MongoDB** (via `analyse_company.py`) |
+| `cathie_wood_philosophy` | 663 | ✅ active (YouTube rebuild complete) |
+| `company_financials` | ~33 | ✅ active (MongoDB, via `analyse_company.py --ticker MDB`) |
 
 - **System prompts:** all five agent prompts (`buffett`, `cathie_wood`,
   `peter_lynch`, `howard_marks`, `ray_dalio`) follow the **standard skeleton**
@@ -131,8 +146,8 @@ Kitchen Table/
   guardrails, citation rules. Cathie's prompt is now **lean and RAG-driven**, matching
   the others (the old prescriptive framework-listing version is gone).
 - **Active agents:** `buffett` ✅, `howard_marks` ✅, `ray_dalio` ✅, `peter_lynch` ✅,
-  `cathie_wood` 🔄 (rebuilding — ~442 chunks as of last check, target ~42 videos;
-  usable but still filling out).
+  `cathie_wood` ✅ (YouTube bulk rebuild complete — 663 chunks). All five are fully
+  ingested into MongoDB Atlas with Gemini embeddings.
 - **Ray Dalio — newly built:** registered in `AGENT_REGISTRY` (slate-teal), prompt
   written to the §16 standard, brain built from Principles / Big Debt Crises /
   Changing World Order + research PDFs (2,645 chunks). Systematic macro/cycle voice.
@@ -146,18 +161,18 @@ Kitchen Table/
   NOT ingest that material to "fix" them.
 - **Munger:** present in `AGENT_REGISTRY` (config.py) but has **no folder, no
   system prompt, no collection**. Including it in `--agents` will error until built.
-- **Company data:** `company_financials` currently holds **MongoDB**, loaded via
-  `analyse_company.py --ticker MDB` (yfinance + SEC EDGAR, ~33 chunks). This wiped
-  the earlier Datadog PDF load (both `ingest_company.py` and `analyse_company.py`
-  **wipe on each run by default** — one company at a time; use `--append` to keep
-  the existing company). Stored under company key **`MongoDB`** (camel-case
-  preserved via `COMPANY_NAME_OVERRIDES` in config.py); check the live key anytime
-  with `py -3.11 scripts/analyse_company.py --list`.
-- **Cathie rebuild — in progress:** the YouTube bulk ingest is now running with
-  the cookie fix (was at ~340 chunks at last check, target ~42 videos). The earlier
-  blocker was YouTube's bot gate (HTTP 429 "confirm you're not a bot"); resolved by
-  exporting `cookies.txt` and passing `--cookies` (see §7 and §11). Transcripts are
-  in `agents/cathie_wood/philosophy/transcripts/`.
+- **Company data:** `company_financials` currently holds **MongoDB** (the company),
+  loaded via `analyse_company.py --ticker MDB` (yfinance + SEC EDGAR, keyless, ~33
+  chunks). `analyse_company.py` **wipes on each run by default** — one company at a
+  time; use `--append` to keep the existing company and add another. Stored under
+  company key **`MongoDB`** (camel-case preserved via `COMPANY_NAME_OVERRIDES` in
+  config.py); check the live key anytime with
+  `py -3.11 scripts/analyse_company.py --list`.
+- **Cathie rebuild — complete:** the YouTube bulk ingest finished (663 chunks in
+  `cathie_wood_philosophy`). The earlier blocker was YouTube's bot gate (HTTP 429
+  "confirm you're not a bot"); resolved by exporting `cookies.txt` and passing
+  `--cookies` (see §7 and §11). Transcripts are in
+  `agents/cathie_wood/philosophy/transcripts/`.
 
 ---
 
@@ -250,52 +265,57 @@ py -3.11 scripts/ingest_youtube.py --agent cathie_wood --bulk agents/cathie_wood
 - Alternative `--cookies-from-browser chrome` exists but is unreliable on Windows
   (locked cookie DB) — prefer an exported `--cookies` file.
 
-**Older Whisper batch tool** (`pull_transcripts.py`): downloads + transcribes
-every new URL in `agents/<agent>/urls.txt`, saves `.txt` transcripts into the
-philosophy folder, and tracks done URLs in `processed_urls.txt`. After it runs,
-re-run `ingest_philosophy.py` to load the new transcripts into ChromaDB.
+**Older Whisper batch tool** (`obsolete/scripts/pull_transcripts.py`): downloads +
+transcribes every new URL in `agents/<agent>/urls.txt`, saves `.txt` transcripts
+into the philosophy folder, and tracks done URLs in `processed_urls.txt`. After it
+runs, re-run `ingest_philosophy.py` to load the new transcripts into MongoDB Atlas.
+(Retired in favour of `ingest_youtube.py`; kept for reference.)
 
 ---
 
 ## 8. HOW TO LOAD A COMPANY
 
-`ingest_company.py` takes a **folder of PDFs** and auto-detects the company name
-from the folder name (it strips `_raw`/`_data`/etc and Title-cases it).
+Company data is now **auto-ingested by ticker** — no manual PDF dropping.
+`analyse_company.py` pulls everything from **yfinance + SEC EDGAR** (both free and
+**keyless**), computes derived metrics, embeds with Gemini, and writes the chunks
+into the shared `company_financials` collection in MongoDB Atlas.
 
 ```powershell
-# 1. Put the company's PDFs in companies/<Company>/<company>_raw/
-# 2. Point the ingester at that folder:
-py -3.11 scripts/ingest_company.py --folder "companies/Datadog/datadog_raw"
-
-# Add a competitor ALONGSIDE the current company (for comparison debates):
-py -3.11 scripts/ingest_company.py --folder "companies/Adobe/adobe_raw" --append
-```
-
-**Or auto-ingest by ticker** (`analyse_company.py` — no PDFs needed; pulls FMP
-financials + SEC EDGAR filings automatically):
-
-```powershell
-# Auto-ingest by ticker (FMP + SEC EDGAR)
+# Auto-ingest by ticker (yfinance + SEC EDGAR — no API key needed)
 py -3.11 scripts/analyse_company.py --ticker MDB
 py -3.11 scripts/analyse_company.py --ticker MDB --exchange NASDAQ
 
-# Verify what was ingested
+# Add a competitor ALONGSIDE the current company (for comparison debates)
+py -3.11 scripts/analyse_company.py --ticker DDOG --append
+
+# Verify what was ingested for a company
 py -3.11 scripts/analyse_company.py --audit MongoDB
+
+# List the company keys currently loaded
+py -3.11 scripts/analyse_company.py --list
 ```
 
-`FMP_API_KEY` must be set as a Windows environment variable (`setx FMP_API_KEY "..."`).
+What it ingests (each as clean human-readable text chunks): yfinance income /
+balance / cash-flow (one quarter per chunk), a valuation/margin + analyst-rec
+snapshot, computed metrics (SBC %, FCF margin, YoY growth, gross margin, Rule of
+40), and SEC EDGAR filings (last 4× 10-Q + 1× 10-K: MD&A, Risk Factors, Business).
 
 - **Wipes by default** — each run replaces `company_financials` with the new
   company (the engine debates one company at a time). Use `--append` to keep the
   existing company and add another.
-- Company name is stored **Title-cased** (e.g. `Datadog`). The debate engine
-  normalizes `--company` to match, so `--company datadog` / `DATADOG` / `Datadog`
-  all work (`config.normalize_company`). If the company isn't in the DB, the
-  engine refuses to run and lists what *is* loaded.
+- Company name is stored via `config.normalize_company()` — known camel-case names
+  are preserved (`MongoDB`, `CrowdStrike`, `ServiceNow`, …); everything else
+  Title-cases. The debate engine routes `--company` through the **same** function,
+  so `--company mongodb` / `MONGODB` / `MongoDB` all match. If the company isn't in
+  the DB, the engine refuses to run and lists what *is* loaded.
+- **Secrets:** ingestion needs `GOOGLE_API_KEY` (Gemini embeddings) and
+  `MONGODB_URI` (Atlas), both read from `.env`. `--audit` / `--list` only read
+  MongoDB and never load Gemini.
 
-> **Note:** the `--company <name>` / `--ticker` interface in some examples refers
-> to **planned** FMP + SEC EDGAR auto-ingestion (see §12) — **not yet built**.
-> Today you drop PDFs in `companies/<Company>/` and use `--folder`.
+> **Legacy PDF flow:** the old folder-of-PDFs loader, `ingest_company.py`, now
+> lives in `obsolete/scripts/` (ChromaDB era). The current path is ticker-based;
+> reach for the PDF loader only if you specifically need to ingest documents that
+> aren't available via yfinance / SEC EDGAR.
 
 ---
 
@@ -304,7 +324,7 @@ py -3.11 scripts/analyse_company.py --audit MongoDB
 **RAG audit** — see exactly which chunks an agent retrieves for a query, split by
 philosophy vs company, with source files and health warnings:
 ```powershell
-py -3.11 scripts/audit_rag.py --agent buffett --query "stock based compensation" --company datadog
+py -3.11 scripts/audit_rag.py --agent buffett --query "stock based compensation" --company MongoDB
 ```
 
 **Knowledge audit** — full coverage report across agents (dynamic taxonomy +
@@ -321,32 +341,37 @@ gracefully if a call fails.
 **In-debate retrieval audit** — print the per-agent retrieval report *during* a
 debate, right before each agent speaks:
 ```powershell
-py -3.11 main.py --topic "..." --company datadog --audit
+py -3.11 main.py --topic "..." --company MongoDB --audit
 ```
 > The flag is **`--audit`** (shares one code path with `audit_rag.py`). There is
 > no `--debug` flag.
 
-**Vector visualiser** — UMAP 2D scatter of the vector space → interactive HTML
-(currently hardcoded to `buffett_philosophy` + `company_financials`):
-```powershell
-py -3.11 scripts/visualise_db.py   # writes vector_visualisation.html
-```
+**Vector visualiser** — *retired.* `visualise_db.py` was ChromaDB-specific (UMAP
+2D scatter → `vector_visualisation.html`) and now lives in `obsolete/scripts/`. It
+has not been ported to MongoDB Atlas + Gemini.
 
 ---
 
-## 10. CHROMADB COLLECTION NAMING CONVENTION
+## 10. MONGODB ATLAS COLLECTION NAMING & INDEXES
 
+- **Database:** `kitchen_table` — via `config.MONGODB_DB_NAME`.
 - **Agent philosophy:** `{agent_id}_philosophy` (e.g. `buffett_philosophy`) —
-  via `config.philosophy_collection(agent)`.
-- **Company data:** `company_financials` — one shared collection, filtered by
-  metadata `where={"company": <Title-cased name>}` — via `config.COMPANY_COLLECTION`.
+  via `config.mongo_philosophy_collection(agent)`.
+- **Company data:** `company_financials` — one shared collection, scoped in the
+  `$vectorSearch` stage by `filter: {"company": <normalized name>}` — via
+  `config.MONGO_COMPANY_COLLECTION`. Philosophy queries similarly filter on
+  `{"agent": <agent_id>}`.
+- **Vector index:** every collection has an Atlas Vector Search index named
+  **`vector_index`** on the `embedding` path — **3072 dimensions, cosine**
+  (matching Gemini `gemini-embedding-001`). Retrieval will silently return nothing
+  if this index is missing or misnamed, so create it when you add a collection.
 - All naming lives in `config.py`. Don't hardcode collection names elsewhere.
 
-**List every collection and its count:**
+**List every collection and its document count:**
 ```powershell
-py -3.11 -c "import chromadb; client = chromadb.PersistentClient(path='./chroma_db'); [print(f'{c.name}: {client.get_collection(c.name).count()}') for c in client.list_collections()]"
+py -3.11 -c "from pymongo import MongoClient; from config import MONGODB_URI, MONGODB_DB_NAME; db = MongoClient(MONGODB_URI)[MONGODB_DB_NAME]; [print(n, db[n].count_documents({})) for n in db.list_collection_names()]"
 ```
-(Run from the project root so `./chroma_db` resolves.)
+(Run from the project root so `config` imports and loads `.env`.)
 
 ---
 
@@ -375,29 +400,44 @@ py -3.11 -c "import chromadb; client = chromadb.PersistentClient(path='./chroma_
 1. ~~**Howard Marks agent**~~ — ✅ **DONE** (2026-05-31): registered, prompt
    written to §16 standard, 160 memos split from the anthology + 6 extra sources,
    ingested (4,548 chunks), audited. See §4.
-2. ~~**FMP + SEC EDGAR auto-ingestion**~~ — ✅ **Built as `analyse_company.py`** —
-   ticker resolution, FMP financials, computed metrics, SEC EDGAR filings, audit flag.
-3. **Knowledge-audit source finder** — yt-dlp + DuckDuckGo (free, no API key) to
+2. ~~**Company auto-ingestion**~~ — ✅ **Built as `analyse_company.py`** — ticker
+   resolution, **yfinance** financials (FMP dropped — keyless), computed metrics,
+   SEC EDGAR filings, `--audit` / `--list` / `--append` flags.
+3. ~~**MongoDB Atlas + Gemini migration**~~ — ✅ **DONE** (2026-06): all five agent
+   philosophy collections + `company_financials` migrated off local
+   ChromaDB/all-MiniLM onto MongoDB Atlas (`kitchen_table`, `$vectorSearch`,
+   `vector_index`) with Gemini `gemini-embedding-001` (3072-dim). Migrated scripts
+   promoted to `scripts/`; ChromaDB-era versions retired to `obsolete/scripts/`.
+4. ~~**Cathie Wood YouTube bulk rebuild**~~ — ✅ **DONE**: cookie fix unblocked the
+   bot gate; rebuilt to 663 chunks. See §4.
+5. **Knowledge-audit source finder** — yt-dlp + DuckDuckGo (free, no API key) to
    auto-find YouTube videos and articles that fill an agent's coverage gaps.
-4. **Auto-audit on ingest** — `ingest_philosophy.py --audit` / `--audit-quick`.
-5. **"Go verify" action checklist** aggregated at the end of the PDF.
-6. **Auto-math layer** — compute SBC % of revenue, FCF margin, etc. from the
+6. **Auto-audit on ingest** — `ingest_philosophy.py --audit` / `--audit-quick`.
+7. **"Go verify" action checklist** aggregated at the end of the PDF.
+8. **Auto-math layer** — compute SBC % of revenue, FCF margin, etc. from the
    financial data automatically.
-7. **Streamlit UI** for the partner (no CLI required).
-8. **Telegram bot + cloud deployment** (mobile access).
-9. **Beating the Street for Lynch** — highest-priority training gap. (Note: the
-   PDF is already in `peter_lynch/philosophy/peter_lynch_books_raw/` — confirm
-   it's ingested, then close this out.)
-10. **Cathie Wood YouTube bulk rebuild** — pending the cookie fix.
+9. **Streamlit UI** for the partner (no CLI required).
+10. **Telegram bot + cloud deployment** (mobile access) — now far easier with the
+    DB already in the cloud (Atlas) rather than a local ChromaDB file.
+11. **Beating the Street for Lynch** — highest-priority training gap. (Note: the
+    PDF is already in `peter_lynch/philosophy/peter_lynch_books_raw/` — confirm
+    it's ingested, then close this out.)
 
 ---
 
 ## 13. ARCHITECTURE DECISIONS
 
-- **ChromaDB over Pinecone** — local, free, no network dependency, persists
-  across sessions.
-- **`all-MiniLM-L6-v2`** — fast, free, local; good enough for financial-text
-  similarity.
+- **MongoDB Atlas over local ChromaDB** — a cloud vector store with native
+  `$vectorSearch` and per-query metadata filtering. Accessible from anywhere
+  (cloud deploy, partner access, a future Streamlit/Telegram front-end), no local
+  DB file to ship, and it scales past one machine. Trade-off: needs network + a
+  connection string. This replaced the original local ChromaDB store, which was
+  chosen for being free/offline but couldn't be shared or deployed.
+- **Gemini `gemini-embedding-001` (3072-dim) over local `all-MiniLM-L6-v2`
+  (384-dim)** — much richer embeddings → noticeably better retrieval, and a remote
+  API pairs naturally with Atlas (no local model / torch dependency to manage).
+  Trade-off: needs `GOOGLE_API_KEY` and network instead of running for free
+  offline.
 - **Raw transcripts, not Claude-summarised** — preserves the investor's actual
   voice and specific language for accurate embeddings.
 - **Dynamic query expansions over hardcoded** — Claude generates topic-aware
@@ -436,9 +476,10 @@ prescriptive, framework-listing version of Cathie's prompt has been replaced.
 ## 15. SESSION WORKFLOW (typical)
 
 1. **Activate** the venv: `.\.venv\Scripts\Activate.ps1`
-2. **Confirm** `ANTHROPIC_API_KEY` is set (`$env:ANTHROPIC_API_KEY` should print a key).
+2. **Confirm** `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, and `MONGODB_URI` are set
+   (`$env:ANTHROPIC_API_KEY` should print a key).
 3. **Load company data** if it's a new company:
-   `py -3.11 scripts/ingest_company.py --folder "companies/<Company>/<company>_raw"`
+   `py -3.11 scripts/analyse_company.py --ticker <TICKER>`
 4. **Run the debate:**
    `py -3.11 main.py --topic "..." --company <X> --agents ... --turns N`
 5. **PDF** saves automatically to `outputs/`.
@@ -536,7 +577,7 @@ Never fabricate a statistic.
 
 | Forbidden | Why | Where it comes from instead |
 |---|---|---|
-| **Named frameworks** (Wright's Law, PEG ratio, margin of safety, TAM expansion, owner earnings, …) | Bakes philosophy into the prompt | Retrieved from the agent's ChromaDB collection at runtime |
+| **Named frameworks** (Wright's Law, PEG ratio, margin of safety, TAM expansion, owner earnings, …) | Bakes philosophy into the prompt | Retrieved from the agent's MongoDB Atlas collection at runtime |
 | **Topic-specific views** (on SBC, profitability, valuation, interest rates, …) | Freezes a stance the agent should derive | Retrieved + reasoned at runtime against the company's data |
 | **Opponent names** / fixed responses to specific people | Breaks agent-agnostic debate | The engine passes live session history; respond to the actual argument |
 | **Career history** beyond the one identity line | It's biography, not voice | Nowhere — the debate is about the company, not the person |
