@@ -100,7 +100,7 @@ app = FastAPI(title="TIKT API", version="0.1.0")
 # Allow the Vite dev server (http://localhost:5173 / :5174) to call the API in dev.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:5174"],
+    allow_origins=["http://localhost:5173", "http://localhost:5174", "https://investors-of-the-kitchen-table.vercel.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
