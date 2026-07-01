@@ -807,7 +807,7 @@ async def prepare_research(ticker: str, body: dict = {}):
         try:
             # Imported lazily (like the debate engine's imports) so a missing or
             # slow research_downloader never blocks `uvicorn main:app` startup.
-            from backend.research_downloader import build_research_package
+            from research_downloader import build_research_package
 
             progress_events = []
 
