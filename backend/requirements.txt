@@ -11,3 +11,7 @@ pypdf                 # .pdf text extraction
 langchain-text-splitters  # RecursiveCharacterTextSplitter chunking
 google-genai          # Gemini embeddings for uploaded-doc chunks
 pymongo               # company_financials storage (Atlas)
+
+# --- PDF generation ---
+weasyprint            # HTML/CSS -> PDF rendering (needs pango/cairo system libs — see nixpacks.toml)
+reportlab             # PDF debate transcript generation

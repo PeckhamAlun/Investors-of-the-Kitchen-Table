@@ -23,7 +23,7 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel
 from datetime import datetime, timezone
 from pymongo.mongo_client import MongoClient
@@ -787,6 +787,103 @@ async def upload_document(
         raise HTTPException(status_code=500, detail=f"Could not store document: {e}")
 
     return {"success": True, "chunks_added": len(chunks), "filename": filename}
+
+
+# ==============================================================================
+# RESEARCH PACKAGE DOWNLOAD
+# ==============================================================================
+# Builds a ZIP of a company's filings + earnings transcripts via
+# backend/research_downloader.build_research_package, streaming build progress to
+# the UI over SSE (same shape as /debate/start). The finished ZIP is cached under
+# /tmp keyed by a per-request download_id, then served by the companion GET below.
+
+
+@app.post("/company/{ticker}/prepare-research")
+async def prepare_research(ticker: str, body: dict = {}):
+    years = body.get("years", 5)
+    download_id = str(uuid.uuid4())
+
+    async def event_stream():
+        try:
+            # Imported lazily (like the debate engine's imports) so a missing or
+            # slow research_downloader never blocks `uvicorn main:app` startup.
+            from backend.research_downloader import build_research_package
+
+            progress_events = []
+
+            def on_progress(message: str):
+                progress_events.append(message)
+
+            # Run the blocking build in a thread pool, streaming progress events
+            # to the client as they accumulate.
+            import concurrent.futures
+            loop = asyncio.get_event_loop()
+
+            zip_bytes = None
+
+            async def run_with_progress():
+                nonlocal zip_bytes
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    zip_bytes = await loop.run_in_executor(
+                        pool,
+                        lambda: asyncio.run(build_research_package(
+                            ticker=ticker.upper(),
+                            years=years,
+                            fmp_api_key=FMP_API_KEY,
+                            progress_callback=on_progress,
+                        )),
+                    )
+
+            task = asyncio.create_task(run_with_progress())
+
+            last_sent = 0
+            while not task.done():
+                # Drain any new progress events
+                while last_sent < len(progress_events):
+                    msg = progress_events[last_sent]
+                    yield f"data: {json.dumps({'type': 'progress', 'message': msg})}\n\n"
+                    last_sent += 1
+                await asyncio.sleep(0.5)
+
+            # Surface any exception raised inside the build task (otherwise it is
+            # silently swallowed and only a generic failure is reported below).
+            await task
+
+            # Drain remaining events
+            while last_sent < len(progress_events):
+                msg = progress_events[last_sent]
+                yield f"data: {json.dumps({'type': 'progress', 'message': msg})}\n\n"
+                last_sent += 1
+
+            # Save ZIP to /tmp
+            if zip_bytes:
+                tmp_path = f"/tmp/{download_id}.zip"
+                with open(tmp_path, "wb") as f:
+                    f.write(zip_bytes)
+                yield f"data: {json.dumps({'type': 'ready', 'download_id': download_id})}\n\n"
+            else:
+                yield f"data: {json.dumps({'type': 'error', 'message': 'Failed to build package'})}\n\n"
+
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/company/{ticker}/download-research/{download_id}")
+async def download_research(ticker: str, download_id: str):
+    path = f"/tmp/{download_id}.zip"
+    if not os.path.exists(path):
+        raise HTTPException(404, "Package not found or expired")
+    return FileResponse(
+        path,
+        media_type="application/zip",
+        filename=f"{ticker.upper()}_Research_Package.zip",
+    )
 
 
 class DebateRequest(BaseModel):
