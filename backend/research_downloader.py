@@ -2,8 +2,8 @@
 research_downloader.py — research-package download logic for the TIKT backend.
 
 Fetches a company's primary-source research (SEC 10-K / 10-Q filings for US
-companies, FMP financial statements for non-US companies, plus the last 12
-quarters of earnings-call transcripts) and assembles them into a single ZIP of
+companies, FMP financial statements for non-US companies, plus a configurable
+window of earnings-call transcripts) and assembles them into a single ZIP of
 PDFs, streamed back to the frontend by main.py.
 
 Standalone module — it does NOT import from backend/main.py. The only thing it
@@ -28,6 +28,7 @@ Networking
 
 import io
 import re
+import sys
 import html
 import zipfile
 import asyncio
@@ -134,7 +135,7 @@ def get_sec_filings(cik: str, form_type: str, years: int) -> list[dict]:
 
 
 # ==============================================================================
-# 3. FILING -> PDF BYTES  (pre-rendered PDF if present, else HTM via WeasyPrint)
+# 3. FILING -> PDF BYTES  (pre-rendered PDF; else WeasyPrint; else ReportLab text)
 # ==============================================================================
 
 def download_filing_as_pdf(
@@ -142,8 +143,9 @@ def download_filing_as_pdf(
 ) -> bytes | None:
     """Return a single SEC filing as PDF bytes. If the filing directory already
     contains a rendered .pdf, download and return it directly; otherwise fetch the
-    primary .htm document and convert it to PDF with WeasyPrint. Returns None on
-    any failure (unresolved doc, network error, conversion error)."""
+    primary .htm document and render it — with WeasyPrint when available, else a
+    ReportLab text fallback so the filing is never silently dropped. Returns None
+    only if the document can't be fetched at all."""
     try:
         acc_nodash = accession.replace("-", "")
         # int(cik) strips the zero-padding — the archives path uses the bare CIK.
@@ -168,17 +170,122 @@ def download_filing_as_pdf(
             resp.raise_for_status()
             return resp.content
 
-        # No rendered PDF — fetch the primary HTM and convert with WeasyPrint.
+        # No rendered PDF — fetch the primary HTM document.
         if not primary_doc:
             return None
         resp = requests.get(f"{base}{primary_doc}", headers=SEC_HEADERS, timeout=SEC_TIMEOUT)
         resp.raise_for_status()
+        htm = resp.text
 
-        from weasyprint import HTML
-        # base_url lets WeasyPrint resolve the filing's relative CSS/image links.
-        return HTML(string=resp.text, base_url=base).write_pdf()
-    except Exception:
+        # Prefer WeasyPrint (preserves the filing's layout and tables). If it — or
+        # its native libraries (pango/cairo/…) — isn't available, fall back to a
+        # plain-text ReportLab render instead of dropping the filing entirely.
+        try:
+            from weasyprint import HTML
+            # base_url lets WeasyPrint resolve the filing's relative CSS/image links.
+            return HTML(string=htm, base_url=base).write_pdf()
+        except Exception as weasy_err:
+            print(
+                f"[research_downloader] WeasyPrint unavailable for {form_type} "
+                f"{date} ({weasy_err}); using ReportLab text fallback.",
+                file=sys.stderr,
+            )
+            text = _html_to_text(htm)
+            if not text:
+                return None
+            return _filing_text_to_pdf(form_type, date, text)
+    except Exception as err:
+        print(
+            f"[research_downloader] filing download failed for {form_type} "
+            f"{date}: {err}",
+            file=sys.stderr,
+        )
         return None
+
+
+def _html_to_text(html_str: str) -> str:
+    """Strip an SEC filing's HTML down to readable plain text: drop script/style
+    blocks, turn block-level tags into line breaks, remove the remaining tags, and
+    unescape entities. Used only for the ReportLab fallback when WeasyPrint can't
+    run."""
+    if not html_str:
+        return ""
+    text = html_str
+    # Drop script/style/head content entirely (never body text).
+    text = re.sub(r"(?is)<(script|style|head)[^>]*>.*?</\1>", " ", text)
+    # Explicit line breaks and block-level closes -> newlines (keep structure).
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(
+        r"(?i)</(p|div|tr|li|h[1-6]|table|thead|tbody|section|header|footer)>",
+        "\n", text,
+    )
+    # Table cells -> a space so adjacent columns don't jam together.
+    text = re.sub(r"(?i)</t[dh]>", " ", text)
+    # Remove every remaining tag.
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    # Unescape entities (&amp; &nbsp; &#8217; …).
+    text = html.unescape(text)
+    # Normalise whitespace: unify newlines, collapse spaces, cap blank runs.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t\u00a0]+", " ", text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _filing_text_to_pdf(form_type: str, filing_date: str, text: str) -> bytes:
+    """Render extracted SEC-filing text into a clean PDF (bytes) with ReportLab —
+    the fallback path when no pre-rendered PDF exists and WeasyPrint is
+    unavailable. Same styling family as the transcript renderer."""
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.units import inch
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_LEFT
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=letter,
+        leftMargin=0.9 * inch,
+        rightMargin=0.9 * inch,
+        topMargin=0.9 * inch,
+        bottomMargin=0.9 * inch,
+        title=f"{form_type} {filing_date}",
+    )
+
+    styles = getSampleStyleSheet()
+    header_style = ParagraphStyle(
+        "FilingHeader", parent=styles["Title"],
+        fontSize=18, leading=22, spaceAfter=4, alignment=TA_LEFT,
+    )
+    date_style = ParagraphStyle(
+        "FilingDate", parent=styles["Normal"],
+        fontSize=10, textColor=colors.grey, spaceAfter=8,
+    )
+    body_style = ParagraphStyle(
+        "FilingBody", parent=styles["Normal"],
+        fontSize=9, leading=13, spaceAfter=5, alignment=TA_LEFT,
+    )
+
+    story = [Paragraph(form_type, header_style)]
+    if filing_date:
+        story.append(Paragraph(f"Filed {filing_date}", date_style))
+    story.append(HRFlowable(width="100%", thickness=1, color=colors.grey,
+                            spaceBefore=2, spaceAfter=10))
+
+    # One Paragraph per line (ReportLab wraps + paginates); escape XML-special
+    # chars so ampersands/angle brackets don't break rendering.
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            story.append(Spacer(1, 4))
+            continue
+        story.append(Paragraph(html.escape(line), body_style))
+
+    doc.build(story, onFirstPage=_page_footer, onLaterPages=_page_footer)
+    return buf.getvalue()
 
 
 # ==============================================================================
@@ -434,14 +541,15 @@ async def _fetch_financials(ticker: str, fmp_api_key: str):
     return _financials_pdf_bytes(ticker, income, balance, cashflow)
 
 
-async def _fetch_transcripts(ticker: str, fmp_api_key: str) -> list[dict]:
-    """Fetch the last 12 quarters of FMP earnings-call transcripts (same period
-    logic as analyse_company.py). Returns [{quarter, year, date, content}, ...],
-    skipping quarters with no transcript. Best-effort — never raises."""
+async def _fetch_transcripts(ticker: str, fmp_api_key: str, years: int) -> list[dict]:
+    """Fetch FMP earnings-call transcripts for the last `years` years (four
+    quarters per year; same period logic as analyse_company.py). Returns
+    [{quarter, year, date, content}, ...], skipping quarters with no transcript.
+    Best-effort — never raises."""
     now = datetime.now()
     y, q = now.year, (now.month - 1) // 3 + 1
     periods = []
-    for _ in range(12):
+    for _ in range(max(1, years) * 4):
         periods.append((y, q))
         q -= 1
         if q == 0:
@@ -488,8 +596,8 @@ async def build_research_package(
 
     For US companies (found in SEC EDGAR): downloads the last `years` years of
     10-K and 10-Q filings as PDFs. For non-US companies: builds a financial-
-    statements PDF from FMP instead. In both cases it also adds the last 12
-    quarters of earnings-call transcripts as PDFs.
+    statements PDF from FMP instead. In both cases it also adds the last `years`
+    years (four quarters per year) of earnings-call transcripts as PDFs.
 
     `progress_callback(message)` is invoked at each step so the FastAPI endpoint
     can stream progress to the frontend."""
@@ -540,7 +648,7 @@ async def build_research_package(
 
     # d. Earnings-call transcripts (FMP; async) — for US and non-US alike.
     progress("Fetching earnings call transcripts...")
-    for t in await _fetch_transcripts(ticker, fmp_api_key):
+    for t in await _fetch_transcripts(ticker, fmp_api_key, years):
         content = (t.get("content") or "").strip()
         if not content:
             continue
