@@ -1,0 +1,47 @@
+# ==============================================================================
+#  .dockerignore — keep the Railway build context small.
+#
+#  Without this, `COPY . .` drags the entire ~2.5 GB working tree into the build
+#  context (venv/, chroma_db/, agent PDFs & videos, frontend/node_modules, …) and
+#  the Railway builder fails unpacking the snapshot. The backend needs only:
+#    - backend/  main.py  config.py  scripts/
+#    - agents/<id>/system_prompt.txt   (all philosophy lives in MongoDB Atlas)
+# ==============================================================================
+
+# --- Virtualenvs, caches, compiled Python ---
+venv/
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# --- Retired local vector store (runtime retrieval is MongoDB Atlas, not this) ---
+chroma_db/
+
+# --- Frontend: deployed separately on Vercel; node_modules is huge ---
+frontend/
+
+# --- Legacy company PDFs (financials come from FMP + MongoDB at runtime) ---
+companies/
+
+# --- Generated output / scratch ---
+outputs/
+_yt_temp/
+obsolete/
+random/
+
+# --- Agent training material: large PDFs/videos, already ingested into MongoDB.
+#     Exclude everything under agents/ EXCEPT each agent's system_prompt.txt,
+#     which the engine reads from disk at runtime. ---
+agents/**
+!agents/*/system_prompt.txt
+
+# --- Secrets & VCS (belt and suspenders; .env is gitignored anyway) ---
+.env
+.git/
+.gitignore
+
+# --- Editor / OS cruft ---
+.DS_Store
+Thumbs.db
