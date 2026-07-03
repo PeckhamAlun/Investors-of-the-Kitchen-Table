@@ -29,6 +29,11 @@ from datetime import datetime, timezone
 from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 
+# Make this backend/ folder importable as a top-level location so sibling modules
+# (e.g. research_downloader) resolve regardless of how the app is launched — as
+# `main:app` (cwd=backend/) OR `backend.main:app` (cwd=repo root, our Docker CMD).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 load_dotenv(dotenv_path="../.env")
 FMP_API_KEY = os.getenv("FMP_API_KEY", "")
 
