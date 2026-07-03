@@ -68,8 +68,12 @@ def _load_debate_engine():
     )
     spec = importlib.util.spec_from_file_location("debate_engine", root_main)
     module = importlib.util.module_from_spec(spec)
-    sys.modules["debate_engine"] = module
+    # Only cache the module AFTER exec_module succeeds. If the engine's
+    # module-level setup (Mongo/Gemini/FMP init) raises, we must NOT leave a
+    # half-initialized module in sys.modules — that would poison every later
+    # request. Let the exception propagate so the next call retries cleanly.
     spec.loader.exec_module(module)
+    sys.modules["debate_engine"] = module
     return module
 
 # Simple in-memory response cache (per-process). Keyed by endpoint + ticker; each
