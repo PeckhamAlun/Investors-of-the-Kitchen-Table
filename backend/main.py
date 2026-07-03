@@ -63,9 +63,39 @@ def _load_debate_engine():
         return sys.modules["debate_engine"]
     import importlib.util
 
-    root_main = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py"
-    )
+    # Locate the engine's main.py. It lives at the PROJECT ROOT, one level above
+    # this backend/ folder — but the on-disk layout differs between local dev and
+    # the deployed container, and os.path.abspath() depends on the current working
+    # directory, which uvicorn doesn't guarantee. So resolve it robustly: look for
+    # a directory that holds BOTH main.py and config.py (the unambiguous project-
+    # root marker), searching this file's parent, the cwd, and a few levels up.
+    here = os.path.dirname(os.path.abspath(__file__))
+    self_path = os.path.abspath(__file__)
+    candidates = [os.path.dirname(here), here, os.getcwd()]
+    _d = here
+    for _ in range(4):
+        _d = os.path.dirname(_d)
+        candidates.append(_d)
+
+    root_main = None
+    for cand in dict.fromkeys(candidates):  # de-dupe, preserve order
+        engine = os.path.join(cand, "main.py")
+        # Must be the ENGINE main.py (config.py beside it), not this backend one.
+        if (os.path.isfile(engine)
+                and os.path.abspath(engine) != self_path
+                and os.path.isfile(os.path.join(cand, "config.py"))):
+            root_main = engine
+            break
+
+    if root_main is None:
+        tried = ", ".join(dict.fromkeys(candidates))
+        raise RuntimeError(
+            "Debate engine not found: no directory containing both main.py and "
+            f"config.py was found (looked in: {tried}). The engine source (root "
+            "main.py, config.py, scripts/, agents/) is not present in this "
+            "deployment — the whole repo must be deployed, not just backend/."
+        )
+
     spec = importlib.util.spec_from_file_location("debate_engine", root_main)
     module = importlib.util.module_from_spec(spec)
     # Only cache the module AFTER exec_module succeeds. If the engine's

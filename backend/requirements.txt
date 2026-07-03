@@ -15,3 +15,8 @@ pymongo               # company_financials storage (Atlas)
 # --- PDF generation ---
 weasyprint            # HTML/CSS -> PDF rendering (needs pango/cairo system libs — see nixpacks.toml)
 reportlab             # PDF debate transcript generation
+
+# --- Debate engine (root main.py, loaded at runtime via _load_debate_engine) ---
+anthropic             # Claude API — agents' LLM
+langgraph             # multi-agent debate orchestration (pulls in langchain-core)
+requests              # scripts/analyse_company.py — FMP financial-data calls (auto-ingest)
