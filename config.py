@@ -177,6 +177,10 @@ AGENT_REGISTRY = {
 AGENT_DISPLAY = {k: v["display"] for k, v in AGENT_REGISTRY.items()}
 AGENT_COLOURS = {k: v["colour"]  for k, v in AGENT_REGISTRY.items()}
 
+# Back-compat aliases: scripts import these MongoDB-era names.
+mongo_philosophy_collection = philosophy_collection
+MONGO_COMPANY_COLLECTION = COMPANY_COLLECTION
+
 # ==============================================================================
 # QUICK SANITY CHECK
 # ==============================================================================
