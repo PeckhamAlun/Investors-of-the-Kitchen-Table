@@ -5,6 +5,7 @@
 // `Sidebar` in Home.jsx.
 
 import { useNavigate, useLocation } from "react-router-dom";
+import { getUser, clearSession } from "../lib/api";
 
 function IconResearch() {
   return (
@@ -86,6 +87,12 @@ const RECENT = [
 export default function Sidebar() {
   const navigate = useNavigate();
   const location = useLocation();
+  const user = getUser() ?? { name: "Member", initials: "?", colour: "#1B4332" };
+
+  const handleLogout = () => {
+    clearSession();
+    navigate("/login");
+  };
 
   return (
     <aside className="flex w-64 flex-shrink-0 flex-col border-r border-tikt-border bg-tikt-sand px-[18px] py-6 text-tikt-body">
@@ -163,13 +170,24 @@ export default function Sidebar() {
 
       {/* user */}
       <div className="mt-auto flex items-center gap-3 border-t border-tikt-border pb-1 pl-1.5 pr-1.5 pt-4">
-        <div className="flex h-9 w-9 items-center justify-center rounded-md bg-tikt-green font-serif text-[13px] font-semibold text-tikt-cream">
-          PA
+        <div
+          className="flex h-9 w-9 items-center justify-center rounded-md font-serif text-[13px] font-semibold text-tikt-cream"
+          style={{ backgroundColor: user.colour || "#1B4332" }}
+        >
+          {user.initials}
         </div>
         <div className="leading-[1.3]">
-          <div className="text-[13.5px] font-semibold text-tikt-ink">Peckham Alun</div>
+          <div className="text-[13.5px] font-semibold text-tikt-ink">{user.name}</div>
           <div className="text-[11px] tracking-[0.3px] text-tikt-faint">Pro · Annual</div>
         </div>
+        <button
+          type="button"
+          onClick={handleLogout}
+          title="Log out"
+          className="ml-auto rounded-md px-2 py-1.5 text-[10px] font-bold uppercase tracking-[1px] text-tikt-faint hover:bg-tikt-hover hover:text-tikt-ink"
+        >
+          Exit
+        </button>
       </div>
     </aside>
   );
