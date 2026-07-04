@@ -171,15 +171,27 @@ def generate_round_title(topic: str, client: anthropic.Anthropic) -> str:
 # INITIALISE SHARED RESOURCES
 # ==============================================================================
 
-print("\n  Initialising Kitchen Table...")
-mongo_client     = MongoClient(MONGODB_URI, server_api=ServerApi('1'))
-db               = mongo_client[MONGODB_DB_NAME]
+# Mongo is initialised lazily — importing this module must stay side-effect
+# free so backend/main.py can exec it via importlib without a cold connection
+# attempt at import time. First get_db() call connects and caches the handle.
+mongo_client     = None
+db               = None
 gemini_client    = google_genai.Client(api_key=GOOGLE_API_KEY)
 anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 
+def get_db():
+    """Connect to MongoDB on first use and cache the client + db handle."""
+    global mongo_client, db
+    if db is None:
+        print("\n  Initialising Kitchen Table...")
+        mongo_client = MongoClient(MONGODB_URI, server_api=ServerApi('1'))
+        db = mongo_client[MONGODB_DB_NAME]
+    return db
+
+
 def available_companies() -> list[str]:
-    col = db[COMPANY_COLLECTION]
+    col = get_db()[COMPANY_COLLECTION]
     return sorted(col.distinct("company"))
 
 
@@ -237,7 +249,7 @@ def retrieve_records(
         embedding = list(result.embeddings[0].values)
 
         # Query philosophy collection
-        phil_col = db[philosophy_collection(agent)]
+        phil_col = get_db()[philosophy_collection(agent)]
         phil_results = phil_col.aggregate([
             {
                 "$vectorSearch": {
@@ -276,7 +288,7 @@ def retrieve_records(
     # chunk for this company at the latest ingest version, most recent first.
     # The embedding field is projected out — we never use it here and it is large.
     if company:
-        comp_col = db[COMPANY_COLLECTION]
+        comp_col = get_db()[COMPANY_COLLECTION]
         comp_results = comp_col.find(
             company_filter,
             {"text": 1, "source": 1, "company": 1},
@@ -801,7 +813,7 @@ def _financial_snapshot_data(company: str | None) -> dict | None:
     the PDF simply skips the page rather than crashing."""
     if not company:
         return None
-    col = db[COMPANY_COLLECTION]
+    col = get_db()[COMPANY_COLLECTION]
     # Latest ingest only — match the retrieval filter so the PDF snapshot and the
     # debate cite the same (most recent) data; older versions remain as history.
     _, latest_version = get_latest_ingest_version(company)
