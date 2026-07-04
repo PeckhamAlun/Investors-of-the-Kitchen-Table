@@ -1245,7 +1245,13 @@ def run_round(
         "audit":       audit,
     }
 
-    final_state = graph.invoke(initial_state)
+    # LangGraph's default recursion limit is 25 — 5 agents × 5 turns traverses
+    # exactly 25 nodes, so any extra agent or turn would crash the round.
+    # LangGraph 1.x takes the limit via run-time config (same pattern as app.py).
+    final_state = graph.invoke(
+        initial_state,
+        config={"recursion_limit": 100},
+    )
     return final_state["history"]
 
 
