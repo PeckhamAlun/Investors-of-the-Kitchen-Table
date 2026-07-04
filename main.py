@@ -298,14 +298,16 @@ def retrieve_records(
 
 
 def _records_to_context(records: list[dict], company: str | None) -> str:
-    """Join records into the prompt context block — exact original formatting."""
-    chunks = []
+    """Join records into the prompt context block — company financials FIRST so
+    they are never truncated; philosophy/other chunks fill the remaining space."""
+    company_chunks = []
+    other_chunks = []
     for r in records:
         if r["collection"] == "company":
-            chunks.append(f"[{company} financials]\n{r['doc']}")
+            company_chunks.append(f"[{company} financials]\n{r['doc']}")
         else:
-            chunks.append(f"[{r['source']}]\n{r['doc']}")
-    return "\n\n---\n\n".join(chunks)
+            other_chunks.append(f"[{r['source']}]\n{r['doc']}")
+    return "\n\n---\n\n".join(company_chunks + other_chunks)
 
 
 def retrieve_context(
