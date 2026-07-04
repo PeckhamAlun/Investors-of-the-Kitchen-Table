@@ -21,7 +21,7 @@ import asyncio
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel
@@ -35,6 +35,11 @@ from pymongo.server_api import ServerApi
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 load_dotenv(dotenv_path="../.env")
+
+# Resolves via the sys.path.insert above under both launch modes
+# (`main:app` locally and `backend.main:app` in the container).
+from auth import get_current_user, verify_token
+
 FMP_API_KEY = os.getenv("FMP_API_KEY", "")
 
 MONGODB_URI = os.getenv("MONGODB_URI", "")
@@ -723,6 +728,7 @@ async def upload_document(
     ticker: str,
     file: UploadFile = File(...),
     company: str = Form(""),
+    _user: dict = Depends(get_current_user),
 ):
     filename = file.filename or "document"
     ext = os.path.splitext(filename)[1].lower()
@@ -838,7 +844,7 @@ async def upload_document(
 
 
 @app.post("/company/{ticker}/prepare-research")
-async def prepare_research(ticker: str, body: dict = {}):
+async def prepare_research(ticker: str, body: dict = {}, _user: dict = Depends(get_current_user)):
     years = body.get("years", 5)
     download_id = str(uuid.uuid4())
 
@@ -925,6 +931,20 @@ async def download_research(ticker: str, download_id: str):
     )
 
 
+class AuthVerifyRequest(BaseModel):
+    password: str = ""
+
+
+@app.post("/auth/verify")
+async def auth_verify(req: AuthVerifyRequest):
+    """Public login endpoint: the password IS the user's API token."""
+    token = req.password.strip()
+    user = verify_token(token)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid password")
+    return {"token": token, "user": user}
+
+
 class DebateRequest(BaseModel):
     ticker: str
     company: str
@@ -937,7 +957,7 @@ class DebateRequest(BaseModel):
 
 
 @app.post("/debate/start")
-async def start_debate(req: DebateRequest):
+async def start_debate(req: DebateRequest, _user: dict = Depends(get_current_user)):
     async def event_stream():
         try:
             # Load the project-root debate engine under a distinct module name so
@@ -1146,7 +1166,7 @@ async def get_debate(session_id: str):
 
 
 @app.delete("/debate/{session_id}")
-async def delete_debate(session_id: str):
+async def delete_debate(session_id: str, _user: dict = Depends(get_current_user)):
     db = get_mongo_db()
     result = db["debates"].delete_one({"session_id": session_id})
     if result.deleted_count == 0:
