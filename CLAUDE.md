@@ -1,660 +1,396 @@
-# CLAUDE.md — Kitchen Table
+# CLAUDE.md — The Kitchen Table (TIKT)
 
-> Master context for this project. Read this first, every session. It tells you
-> what the project is, how it's wired, the current live state, and exactly how to
-> run, train, diagnose, and extend it.
+> Master context. Read this first, every session. It describes the project **as it
+> exists today**: a deployed web app (React + FastAPI + MongoDB Atlas), not the
+> old local CLI-only tool. Where this doc and the code disagree, the code wins —
+> fix this doc.
 
 ---
 
 ## 1. PROJECT OVERVIEW
 
-**Kitchen Table** is a multi-agent equity-research debate engine. It sits famous
-investors — Warren Buffett, Cathie Wood, Peter Lynch (Charlie Munger planned) —
-around a virtual table and runs a **structured, multi-round debate** about a
-specific stock.
+**The Kitchen Table (TIKT)** is a small, internal, 3-person equity-research tool. It
+runs an **AI debate between five famous-investor agents** about any stock, so the
+team can get a fast, multi-perspective read before initiating coverage.
 
-- Each investor is an **agent** with their own **RAG brain**: a MongoDB Atlas
-  collection built from that investor's letters, books, lectures, and interview
-  transcripts. The agent argues *in their own voice*, grounded in their own
-  retrieved philosophy — not a generic LLM persona.
-- A separate collection holds the **target company's financial documents**
-  (earnings transcripts, 10-Ks/10-Qs, investor decks). Agents cite the company's
-  actual numbers.
-- Orchestrated with **LangGraph**: agents take turns, see the full session
-  history, and a neutral analyst writes a **synthesis** at the end of each round.
-- **Output:** a clean, formatted **PDF debate transcript** saved to `outputs/`,
-  readable by anyone — designed so a portfolio manager can initiate stock
-  coverage quickly from the arguments and the "Go verify" checklists.
-
-**Who it's for:** the author and an investing partner — a decision-support tool
-for fast, multi-perspective stock analysis.
+- Pick a ticker → the app pulls that company's financials, then a panel of investor
+  agents (Buffett, Wood, Lynch, Marks, Dalio) **debates it in their own voices**,
+  each grounded in their own philosophy corpus and citing the company's actual
+  numbers. A neutral analyst writes a synthesis.
+- Delivered as a **web app**: React front-end (Vercel) → FastAPI backend (Railway)
+  → MongoDB Atlas. The debate streams token-by-token over SSE.
+- **Who it's for:** three named users (Peckham, Darius, Royden) plus a master admin
+  account. Not public.
 
 ---
 
-## 2. TECH STACK
+## 2. USERS & ACCESS
 
-- **Python 3.11 on Windows** — every command uses `py -3.11`.
-- **PowerShell terminal** (not CMD — syntax differs; e.g. `$env:VAR`, `;` to
-  chain, `.ps1` activation).
-- **Virtual environment** at `.venv` — activate before any command:
-  ```powershell
-  .\.venv\Scripts\Activate.ps1
-  ```
-- **MongoDB Atlas** — cloud vector store via `pymongo`, database `kitchen_table`.
-  Each collection carries an Atlas **Vector Search** index named `vector_index` on
-  the `embedding` path (3072-dim, cosine). Retrieval is the `$vectorSearch`
-  aggregation stage, scoped per agent/company with a `filter` on metadata. Needs
-  network + a connection string (no local DB file).
-- **Embedding model:** Gemini `gemini-embedding-001` (3072-dim) via the
-  `google-genai` SDK — remote API, needs `GOOGLE_API_KEY`. Replaced the original
-  local `all-MiniLM-L6-v2` (384-dim); the ChromaDB/MiniLM era is retired (see §13).
-- **LLM:** `claude-sonnet-4-6` via the Anthropic API (`anthropic` SDK).
-- **LangGraph** — debate orchestration / multi-agent state.
-- **ReportLab** — PDF generation.
-- **API keys / secrets** stored in `.env` file in project root — copy
-  `.env.example` to `.env` and fill in your keys. Never commit `.env`. (`config.py`
-  calls `load_dotenv()` at import time, so every script picks them up
-  automatically.) Required keys: **`MONGODB_URI`** (Atlas connection string),
-  **`GOOGLE_API_KEY`** (Gemini embeddings), **`ANTHROPIC_API_KEY`** (Claude). No
-  FMP key — company financials now come from keyless yfinance + SEC EDGAR (see §8).
-- Optional/aux deps: `pymongo` + `google-genai` (store + embeddings), `pdfplumber`
-  (PDF text), `langchain-text-splitters` (chunking), `yfinance` (company
-  financials), `yt-dlp` + `openai-whisper` + `ffmpeg` (YouTube ingest).
+Four accounts, defined in `backend/auth.py` (`_USERS`). Each user's **key is both
+their password and their bearer token**, read from an env var; an unset key
+disables that user (no error).
 
----
-
-## 3. PROJECT STRUCTURE
-
-```
-Kitchen Table/
-├── CLAUDE.md                  ← this file
-├── config.py                  ← single source of truth: paths, models, AGENT_REGISTRY, helpers
-├── main.py                    ← THE DEBATE ENGINE (LangGraph orchestration + PDF output)
-├── youtube_processor.py       ← legacy YouTube helper (referenced by older flows)
-├── urls.txt                   ← scratch/root URL list
-├── cookies.txt                ← exported YouTube cookies (for yt-dlp bot gate)
-├── .gitignore
-│
-├── agents/                    ← one folder per investor (folder name = agent id)
-│   ├── buffett/
-│   │   ├── system_prompt.txt          ← Buffett's voice/guardrails (short, RAG-driven)
-│   │   ├── buffett_letters_raw.txt    ← raw source (pre-processing)
-│   │   └── philosophy/                ← ingested into buffett_philosophy
-│   │       ├── buffett_letters.txt
-│   │       └── buffett_books_raw/     ← 3 PDFs: Snowball, Tap Dancing to Work, University of Berkshire Hathaway
-│   ├── cathie_wood/
-│   │   ├── system_prompt.txt          ← lean, RAG-driven (§16 standard)
-│   │   ├── urls.txt                   ← 42 YouTube URLs (source for the rebuild)
-│   │   └── philosophy/
-│   │       └── transcripts/           ← transcript .txt files + manifest.json (ingested — 663 chunks, see §4)
-│   └── peter_lynch/
-│       ├── system_prompt.txt
-│       ├── urls.txt
-│       └── philosophy/
-│           ├── *.webm                 ← 4 lecture/interview videos (NOT auto-ingested; .webm unsupported)
-│           ├── peter_lynch_books_raw/ ← 3 PDFs: One Up On Wall Street, Beating the Street, Learn to Earn
-│           └── transcripts/           ← manifest.json
-│   (no munger/ folder yet — see §4)
-│
-├── companies/                 ← raw company PDFs (legacy --folder flow; live data now pulled by ticker — see §8)
-│   ├── Adobe/adobe_raw/        ← 12 quarterly PDFs (on disk; not in the DB)
-│   └── Datadog/datadog_raw/    ← 19 transcript/report/deck PDFs (on disk; not in the DB)
-│
-├── scripts/                   ← ALL scripts now MongoDB Atlas + Gemini (migrated from ChromaDB)
-│   ├── ingest_philosophy.py   ← build an agent brain in MongoDB Atlas from philosophy/ (.txt + .pdf, recursive; Gemini embeddings)
-│   ├── analyse_company.py     ← auto-ingest company financials by ticker (yfinance + SEC EDGAR) into company_financials. --audit / --list / --append.
-│   ├── ingest_youtube.py      ← YouTube → transcript → agent brain (captions, Whisper fallback)
-│   ├── audit_rag.py           ← inspect exactly what an agent retrieves for a query ($vectorSearch)
-│   ├── knowledge_audit.py     ← coverage audit across agent philosophy collections (MongoDB + Gemini)
-│   ├── query.py               ← single-agent Q&A interface (ask one agent, no debate)
-│   └── split_memo_collection.py ← split a memo anthology PDF into one PDF per memo (Howard Marks build)
-│
-├── chroma_db/                 ← LEGACY ChromaDB store — no longer used (retired in the Atlas migration; kept for reference only)
-├── outputs/                   ← generated debate PDFs (YYYYMMDD_HHMM_session.pdf)
-├── obsolete/                  ← retired scripts (ingest_buffett.py, ingest_books.py, query_buffett.py, …)
-│   └── scripts/               ← the ChromaDB-era versions of the migrated tools (ingest_company.py, pull_transcripts.py, visualise_db.py, + the old ChromaDB ingest/audit/query/analyse)
-└── _yt_temp/                  ← scratch dir for yt-dlp audio (auto-cleaned)
-```
-
-> **Migration note:** the active scripts in `scripts/` are the MongoDB Atlas +
-> Gemini rewrites. They were developed under a temporary `migration/` folder, then
-> promoted to `scripts/` once verified; the original ChromaDB + all-MiniLM versions
-> were moved to `obsolete/scripts/`. The `migration/` folder no longer exists.
-
----
-
-## 4. CURRENT STATE (as of 2026-06-12)
-
-**Live database: MongoDB Atlas** (`kitchen_table`). Every collection has a
-`vector_index` Atlas Vector Search index on `embedding` (3072-dim, cosine), built
-with Gemini `gemini-embedding-001`. Chunk counts below carry over from the source
-corpora (chunking is unchanged by the embedding swap); verify live counts anytime
-with the §10 command.
-
-| Collection | Chunks | Status |
+| Env var | owner | Notes |
 |---|---|---|
-| `buffett_philosophy` | 6,429 | ✅ active |
-| `howard_marks_philosophy` | 4,548 | ✅ active (166 sources) |
-| `ray_dalio_philosophy` | 2,645 | ✅ active |
-| `peter_lynch_philosophy` | 1,038 | ✅ active |
-| `cathie_wood_philosophy` | 663 | ✅ active (YouTube rebuild complete) |
-| `company_financials` | ~33 | ✅ active (MongoDB, via `analyse_company.py --ticker MDB`) |
+| `PECKHAM_KEY` | `peckham` | Peckham Alun |
+| `DARIUS_KEY`  | `darius`  | Darius |
+| `ROYDEN_KEY`  | `royden`  | Royden |
+| `MASTER_KEY`  | `master`  | "Kitchen Table" admin — **sees all users' debate history** |
 
-- **System prompts:** all five agent prompts (`buffett`, `cathie_wood`,
-  `peter_lynch`, `howard_marks`, `ray_dalio`) follow the **standard skeleton**
-  documented in §16 — immersive identity, RAG-driven mind, evidence handling, voice,
-  guardrails, citation rules. Cathie's prompt is now **lean and RAG-driven**, matching
-  the others (the old prescriptive framework-listing version is gone).
-- **Active agents:** `buffett` ✅, `howard_marks` ✅, `ray_dalio` ✅, `peter_lynch` ✅,
-  `cathie_wood` ✅ (YouTube bulk rebuild complete — 663 chunks). All five are fully
-  ingested into MongoDB Atlas with Gemini embeddings.
-- **Ray Dalio — newly built:** registered in `AGENT_REGISTRY` (slate-teal), prompt
-  written to the §16 standard, brain built from Principles / Big Debt Crises /
-  Changing World Order + research PDFs (2,645 chunks). Systematic macro/cycle voice.
-- **Howard Marks — newly built (§6 walkthrough):** brain built from his complete
-  memo collection. The 1,640-page anthology was split into **160 individual memo
-  PDFs** (one per memo, named `marks_memo_<title>_<year>.pdf`) via
-  `scripts/split_memo_collection.py`, plus 3 transcripts and 3 standalone pieces —
-  166 sources, 4,548 chunks. Source diversity is excellent (no single source >1%).
-  His audit "WEAK" areas (SaaS, management quality, consumer brands) are **expected
-  and correct** — he is a macro/cycle/credit/risk thinker, not a stock-picker; do
-  NOT ingest that material to "fix" them.
-- **Munger:** present in `AGENT_REGISTRY` (config.py) but has **no folder, no
-  system prompt, no collection**. Including it in `--agents` will error until built.
-- **Company data:** `company_financials` currently holds **MongoDB** (the company),
-  loaded via `analyse_company.py --ticker MDB` (yfinance + SEC EDGAR, keyless, ~33
-  chunks). `analyse_company.py` **wipes on each run by default** — one company at a
-  time; use `--append` to keep the existing company and add another. Stored under
-  company key **`MongoDB`** (camel-case preserved via `COMPANY_NAME_OVERRIDES` in
-  config.py); check the live key anytime with
-  `py -3.11 scripts/analyse_company.py --list`.
-- **Cathie rebuild — complete:** the YouTube bulk ingest finished (663 chunks in
-  `cathie_wood_philosophy`). The earlier blocker was YouTube's bot gate (HTTP 429
-  "confirm you're not a bot"); resolved by exporting `cookies.txt` and passing
-  `--cookies` (see §7 and §11). Transcripts are in
-  `agents/cathie_wood/philosophy/transcripts/`.
+Per-user **debate-history isolation**: new debate documents are stamped with the
+caller's `owner`; `GET /debates` and `GET /debates/{ticker}` filter by it. `master`
+sees everything; everyone else sees only their own. Legacy pre-isolation debates
+have no `owner` field and are invisible to regular users by design.
 
 ---
 
-## 5. HOW TO RUN A DEBATE
+## 3. TECH STACK
 
+- **Frontend:** React + Vite + Tailwind CSS, React Router. Deployed on **Vercel**.
+- **Backend:** **FastAPI** (Python 3.11), served by uvicorn. Deployed on **Railway**.
+- **Database:** **MongoDB Atlas** — Singapore (`ap-southeast-1`), **Flex** tier,
+  database **`kitchen_table`**. Vector search via the `$vectorSearch` aggregation
+  stage; every vector collection has an index named **`vector_index`** on the
+  `embedding` path (**3072-dim, cosine**).
+- **Embeddings:** Gemini **`gemini-embedding-001`** (3072-dim) via `google-genai`
+  (`GOOGLE_API_KEY`).
+- **AI (debate LLM):** Anthropic **Claude Sonnet** (`claude-sonnet-4-6`) via the
+  `anthropic` SDK. Key: **`ANTHROPIC_API_KEY_DEBATE`** (falls back to
+  `ANTHROPIC_API_KEY` — see `config.py`).
+- **Financial data:** **FMP (Financial Modeling Prep)** — the **primary source for
+  all financial data**: statements, earnings-call transcripts, analyst data, peers,
+  quotes, profiles, price history, search. Key: `FMP_API_KEY`.
+- **SEC filings:** **SEC EDGAR REST API** (keyless) for 10-K / 10-Q text —
+  `backend/research_downloader.py` (downloadable ZIP) and `scripts/analyse_company.py`
+  (ingest).
+- **Orchestration:** LangGraph (debate state machine, in root `main.py`).
+- **PDF:** WeasyPrint (HTML/CSS → PDF; needs pango/cairo system libs) + ReportLab.
+
+Local dev is **Windows + PowerShell**, Python 3.11. Virtual environment lives at
+`venv/`:
 ```powershell
-# Specify everything
-py -3.11 main.py --topic "Is MongoDB a good investment?" --company mongodb --agents buffett peter_lynch --turns 3
-
-# Choose who speaks first
-py -3.11 main.py --topic "..." --company datadog --agents buffett peter_lynch --turns 3 --first peter_lynch
-
-# Show retrieval audit before each agent speaks (see §9)
-py -3.11 main.py --topic "..." --company datadog --audit
-
-# Interactive mode (prompts for the topic)
-py -3.11 main.py
+.\venv\Scripts\Activate.ps1        # then use `python …`
+# or call it directly: .\venv\Scripts\python.exe …
 ```
 
-**Flags:** `--topic` (the debate question), `--company` (case-insensitive — see
-§8/§10; must already be loaded in the DB), `--agents` (space-separated ids;
-default `buffett cathie_wood`), `--turns` (responses per agent per round, default
-5), `--first` (reorder so this agent opens), `--audit` (print retrieval report
-per agent).
+---
 
-**Multi-round sessions:** after a round finishes (all turns + synthesis), the
-engine **prompts for your next topic**. Type another question to run another
-round (it carries the full prior history forward), or type `quit` / `stop` /
-`exit` / `q` / `done` to finish.
+## 4. REPO STRUCTURE
 
-**Output:** on exit, the whole session is written to
-`outputs/YYYYMMDD_HHMM_session.pdf` — cover page, each round's turns, agent
-bullets/conviction lines, "Go verify" notes, and the analyst synthesis.
+```
+/ (repo root — the WHOLE repo deploys to Railway; see §9)
+├── main.py                 ← DEBATE ENGINE: LangGraph graph, SSE streaming
+│                             (stream_debate_round), run_round, PDF output, CLI
+├── config.py               ← shared config: paths, models, AGENT_REGISTRY,
+│                             normalize_company(), env-var loading (load_dotenv)
+├── app.py                  ← LEGACY Streamlit UI — broken/superseded (see §11)
+├── youtube_processor.py    ← root-level Whisper helper (legacy; needs path fixes)
+├── Dockerfile              ← Railway build (python:3.11-slim; see §9)
+├── nixpacks.toml           ← leftover from the earlier Nixpacks build (superseded
+│                             by Dockerfile; lists the same pango/cairo libs)
+│
+├── agents/                 ← one folder per investor (folder name = agent id)
+│   └── <agent_id>/
+│       ├── system_prompt.txt   ← voice + guardrails (see §12 standard)
+│       └── philosophy/         ← source corpus (.txt / .pdf) → *_philosophy collection
+│
+├── scripts/
+│   ├── analyse_company.py      ← FMP + SEC EDGAR ingest → company_financials
+│   │                             (ingest_by_ticker()); --ticker/--audit/--list/--append
+│   ├── ingest_philosophy.py    ← build an agent brain from agents/<id>/philosophy/
+│   ├── ingest_youtube.py       ← YouTube → transcript → agent brain (Whisper fallback)
+│   ├── audit_rag.py            ← inspect what an agent retrieves for a query
+│   ├── knowledge_audit.py      ← coverage audit across agents
+│   ├── query.py                ← single-agent Q&A
+│   └── split_memo_collection.py← split a memo anthology PDF (Howard Marks build)
+│
+├── backend/
+│   ├── main.py                 ← FastAPI server — ALL API endpoints (§5)
+│   ├── auth.py                 ← bearer-token auth, 4 users (§2)
+│   ├── research_downloader.py  ← SEC EDGAR + FMP → downloadable research ZIP
+│   └── requirements.txt        ← SLIM runtime deps (what actually ships)
+│
+├── frontend/
+│   ├── src/
+│   │   ├── pages/              ← Login, Home, Company, Statements, Debate, History
+│   │   ├── components/         ← TickerBar (sidebar), MarketTicker, SearchBar,
+│   │   │                         RequireAuth (route guard)
+│   │   ├── App.jsx             ← routes; RequireAuth wraps the authed routes
+│   │   └── lib/api.js          ← apiFetch() — the single fetch wrapper (§5)
+│   ├── vercel.json             ← SPA rewrite so React Router deep links work
+│   └── .env.local             ← VITE_API_URL for local dev (gitignored)
+│
+├── outputs/                    ← generated debate PDFs
+├── obsolete/                   ← retired scripts (ChromaDB-era tools, etc.)
+└── .env                        ← local secrets (gitignored)
+```
+
+> The root `requirements.txt` is the heavy **dev** set (chromadb, torch/whisper,
+> umap, plotly, yt-dlp) for local ingest/analysis. The container installs only the
+> slim `backend/requirements.txt`.
 
 ---
 
-## 6. HOW TO ADD A NEW AGENT (e.g. Howard Marks — ~5 minutes)
+## 5. THE API (`backend/main.py`)
 
-1. **Register** in `config.py` → `AGENT_REGISTRY`:
-   ```python
-   "howard_marks": {"display": "Howard Marks", "colour": (0.20, 0.30, 0.45)},
-   ```
-2. **Create the folder:** `agents/howard_marks/`
-3. **Add source material:** `agents/howard_marks/philosophy/` — drop in `.txt`
-   files and/or a `*_books_raw/` subfolder of PDFs (memos, books, transcripts).
-4. **Write the voice:** `agents/howard_marks/system_prompt.txt` — short, voice +
-   guardrails only, RAG-driven (see §14; copy Buffett/Lynch as the template).
-5. **Build the brain:**
-   ```powershell
-   py -3.11 scripts/ingest_philosophy.py --agent howard_marks
-   ```
-6. **Check coverage:**
-   ```powershell
-   py -3.11 scripts/knowledge_audit.py --agent howard_marks
-   ```
-7. **Test** with a short debate:
-   ```powershell
-   py -3.11 main.py --topic "Is Datadog a good investment?" --company datadog --agents buffett howard_marks --turns 2
-   ```
+All endpoints live in `backend/main.py`. Reads (`/company/*`, `/market-data`,
+`/search`) hit **FMP** and use a small in-process TTL cache. Auth-guarded routes
+depend on `get_current_user` (bearer token).
 
-That's it — the single `AGENT_REGISTRY` entry wires the agent into the engine,
-audits, and PDF colouring automatically.
+- `GET  /health`
+- `GET  /market-data`, `GET /search`
+- `GET  /company/{ticker}/profile | price-history | metrics | financials | statements`
+- `POST /company/{ticker}/upload-document` *(auth)* — user PDF/TXT/MD/DOCX →
+  chunked, Gemini-embedded, written into `company_financials` at the company's
+  latest ingest version.
+- `POST /company/{ticker}/prepare-research` *(auth, SSE)* + `GET .../download-research/{id}`
+  — build & serve a research ZIP via `research_downloader.py`.
+- `POST /auth/verify` — login (password == token).
+- `POST /debate/start` *(auth, SSE)* — the main event. Resolves the company (auto-
+  ingests via FMP if missing), then streams the debate token-by-token; stamps
+  `owner` and persists each round to the `debates` collection.
+- `GET  /debate/{session_id}` — single session (UUID, unguessable; no owner filter).
+- `DELETE /debate/{session_id}` *(auth)*.
+- `GET  /debates` *(auth)* and `GET /debates/{ticker}` *(auth)* — history lists,
+  **owner-filtered** (master sees all).
+
+**Frontend rule:** every API call goes through **`apiFetch()` in
+`frontend/src/lib/api.js`**, which prepends `VITE_API_URL` and attaches the bearer
+token. Never `fetch()` the backend directly; never hardcode the Railway URL.
 
 ---
 
-## 7. HOW TO TRAIN AN AGENT
+## 6. ARCHITECTURE NOTES
 
-**From PDFs / text files** (rebuilds the collection from `agents/<agent>/philosophy/`):
+- **Dynamic engine load.** Root `main.py` (the debate engine) and `backend/main.py`
+  are **both named `main.py`**, so the backend loads the engine at runtime via
+  `importlib` (`_load_debate_engine()` in `backend/main.py`) under the module name
+  `debate_engine`. **The whole repo must be deployed** (not just `backend/`) or the
+  engine, `config.py`, `scripts/`, and `agents/` won't be importable and every
+  debate fails.
+- **Company financials = full context dump, NOT semantic RAG.** For the company,
+  the engine pulls **every** chunk at the latest ingest version and concatenates it,
+  financials-first, so the numbers are never truncated. The cap is
+  **`MAX_CONTEXT_CHARS = 24000`** (`main.py`). Only **philosophy** retrieval uses
+  Gemini vector search (`$vectorSearch`) in Atlas, scoped by `{"agent": <id>}`.
+- **Auth / isolation.** Per-user bearer tokens from Railway env vars; owner stamped
+  on new debate docs; history endpoints filter by owner (master = all). See §2.
+- **Streaming.** The engine drives *synchronous* Anthropic streaming; the backend
+  bridges it to the async SSE response over a queue, so the event loop isn't blocked
+  during a debate.
+- **Frontend config.** The backend URL comes from **`VITE_API_URL`** (set in Vercel
+  for prod, `frontend/.env.local` for dev). All calls flow through `apiFetch()`.
+
+---
+
+## 7. AGENTS
+
+Five agents are fully built (registry entry + `system_prompt.txt` + philosophy
+collection) and can debate:
+
+| id | display |
+|---|---|
+| `buffett`      | Warren Buffett |
+| `cathie_wood`  | Cathie Wood |
+| `peter_lynch`  | Peter Lynch |
+| `howard_marks` | Howard Marks |
+| `ray_dalio`    | Ray Dalio |
+
+The roster is defined once in `config.py` → `AGENT_REGISTRY`; that single entry
+wires an agent into the engine, audits, and PDF colouring. To add one, see §12 for
+the prompt standard and `scripts/ingest_philosophy.py` for the brain.
+
+> ⚠️ **Charlie Munger and Michael Burry appear in UI copy but have NO philosophy
+> corpus and cannot run debates.** `munger` is in `AGENT_REGISTRY` (config.py) and
+> in front-end name maps; Burry appears in some page copy. Selecting either would
+> fail at retrieval. **Remove or fix that copy** before anyone tries them as agents,
+> or build their corpora first.
+
+---
+
+## 8. DATA SOURCING  *(the old doc got this wrong — this is current)*
+
+- **FMP is the PRIMARY source for everything financial** — statements, earnings-call
+  transcripts, analyst data, peers, quotes, profiles, price history, search. Used
+  both by the backend read endpoints and by `scripts/analyse_company.py` at ingest.
+- **yfinance was REMOVED entirely** — do not reference or reintroduce it.
+  (Gotcha: the `source_type` tags stored in Mongo are still literally
+  `yfinance_financials` / `yfinance_metrics` — **legacy labels only; the data is
+  FMP**. Don't be fooled by the tag name.)
+- **SEC EDGAR** is used for **10-K / 10-Q filing text only** — ingested by
+  `analyse_company.py` and downloaded by `research_downloader.py`.
+- **Embeddings: Gemini `gemini-embedding-001` (3072-dim).** Not all-MiniLM-L6-v2,
+  not ChromaDB — those were removed months ago. (`config.py` still defines dead
+  constants `EMBED_MODEL = "all-MiniLM-L6-v2"`, `CHROMA_DIR`, and a `chroma_db/`
+  folder may linger — all inert. Ignore them.)
+
+---
+
+## 9. ENVIRONMENT VARIABLES
+
+**Railway (backend):**
+```
+MONGODB_URI
+MONGODB_DB_NAME=kitchen_table
+FMP_API_KEY
+GOOGLE_API_KEY
+ANTHROPIC_API_KEY_DEBATE
+PECKHAM_KEY
+DARIUS_KEY
+ROYDEN_KEY
+MASTER_KEY
+```
+
+**Vercel (frontend):**
+```
+VITE_API_URL=https://investors-of-the-kitchen-table-production.up.railway.app
+```
+
+**Local dev:**
+- `.env` at repo root (gitignored) — same backend keys. `config.py` calls
+  `load_dotenv()` at import, so every script/CLI picks them up.
+- `frontend/.env.local` → `VITE_API_URL=http://localhost:8000`.
+
+> Atlas enforces an **IP allowlist** — local scripts that hit Mongo will time out
+> unless your current dev IP is allowlisted in the Atlas dashboard.
+
+---
+
+## 10. DEPLOYMENT
+
+- **Railway (backend + engine):** **Root Directory must be blank** so the build
+  context is the whole repo (the backend loads root `main.py` via importlib — §6).
+  Builds via the **`Dockerfile`** (`python:3.11-slim`; apt-installs pango/cairo/etc.
+  for WeasyPrint; installs only `backend/requirements.txt`; `COPY . .`;
+  `CMD uvicorn backend.main:app --host 0.0.0.0 --port ${PORT}`). `nixpacks.toml` is
+  a superseded leftover from the earlier Nixpacks build — the Dockerfile is
+  authoritative.
+- **Vercel (frontend):** Root Directory = **`frontend`**, framework = **Vite**.
+  `frontend/vercel.json` provides the SPA rewrite so React Router deep links resolve.
+- **MongoDB Atlas:** Singapore (`ap-southeast-1`), Flex tier, DB `kitchen_table`.
+
+---
+
+## 11. LOCAL / CLI OPERATIONS
+
+The root engine still runs as a CLI (useful for local testing and data ops). Run
+from the repo root with the venv active.
+
+**Run a debate (CLI):**
 ```powershell
-py -3.11 scripts/ingest_philosophy.py --agent buffett
-py -3.11 scripts/ingest_philosophy.py --agent buffett --append   # add without wiping
+python main.py --topic "Is MongoDB a good investment?" --company mongodb --agents buffett peter_lynch --turns 3
+python main.py --audit   # print each agent's retrieval report before it speaks
 ```
-Handles `.txt` files and `.pdf` files (including PDFs in subfolders)
-automatically. Default run **wipes and rebuilds** that agent's collection;
-`--append` adds to it.
+Flags: `--topic`, `--company` (case-insensitive; routed through
+`config.normalize_company()`, must already be in the DB), `--agents`, `--turns`,
+`--first`, `--audit`.
 
-**From YouTube** (`ingest_youtube.py`) — needs `cookies.txt` to pass the bot gate:
+**Load a company** (FMP + SEC EDGAR → `company_financials`; **needs `FMP_API_KEY`
+and `GOOGLE_API_KEY`**):
 ```powershell
-# Single video
-py -3.11 scripts/ingest_youtube.py --agent peter_lynch --url "URL" --cookies "C:\Users\peckh\Downloads\cookies.txt"
-
-# Bulk from a urls.txt (one URL per line, '#' for comments)
-py -3.11 scripts/ingest_youtube.py --agent cathie_wood --bulk agents/cathie_wood/urls.txt --cookies "C:\Users\peckh\Downloads\cookies.txt"
+python scripts/analyse_company.py --ticker MDB          # wipes & loads one company
+python scripts/analyse_company.py --ticker DDOG --append# add a competitor alongside
+python scripts/analyse_company.py --list                # list loaded company keys
+python scripts/analyse_company.py --audit MongoDB
 ```
-- **Captions-first:** uses free creator captions (`youtube-transcript-api`). For
-  caption-less videos, add `--whisper` to enable the audio-download + Whisper
-  `large-v3` fallback (needs `ffmpeg` + a JS runtime for YouTube's n-challenge).
-- **Duplicate detection is built in** (by URL) — safe to rerun; already-ingested
-  videos are skipped, not double-counted.
-- Alternative `--cookies-from-browser chrome` exists but is unreliable on Windows
-  (locked cookie DB) — prefer an exported `--cookies` file.
+Wipes `company_financials` by default (one company at a time); `--append` keeps the
+existing one. In the web app this same pipeline (`ingest_by_ticker`) auto-runs from
+`POST /debate/start` when a company isn't loaded yet.
 
-**Older Whisper batch tool** (`obsolete/scripts/pull_transcripts.py`): downloads +
-transcribes every new URL in `agents/<agent>/urls.txt`, saves `.txt` transcripts
-into the philosophy folder, and tracks done URLs in `processed_urls.txt`. After it
-runs, re-run `ingest_philosophy.py` to load the new transcripts into MongoDB Atlas.
-(Retired in favour of `ingest_youtube.py`; kept for reference.)
-
----
-
-## 8. HOW TO LOAD A COMPANY
-
-Company data is now **auto-ingested by ticker** — no manual PDF dropping.
-`analyse_company.py` pulls everything from **yfinance + SEC EDGAR** (both free and
-**keyless**), computes derived metrics, embeds with Gemini, and writes the chunks
-into the shared `company_financials` collection in MongoDB Atlas.
-
+**Add / train an agent:** register in `config.py` → `AGENT_REGISTRY`, create
+`agents/<id>/system_prompt.txt` (see §12), drop corpus into
+`agents/<id>/philosophy/`, then:
 ```powershell
-# Auto-ingest by ticker (yfinance + SEC EDGAR — no API key needed)
-py -3.11 scripts/analyse_company.py --ticker MDB
-py -3.11 scripts/analyse_company.py --ticker MDB --exchange NASDAQ
-
-# Add a competitor ALONGSIDE the current company (for comparison debates)
-py -3.11 scripts/analyse_company.py --ticker DDOG --append
-
-# Verify what was ingested for a company
-py -3.11 scripts/analyse_company.py --audit MongoDB
-
-# List the company keys currently loaded
-py -3.11 scripts/analyse_company.py --list
+python scripts/ingest_philosophy.py --agent <id>        # --append to add without wiping
+python scripts/knowledge_audit.py --agent <id>
 ```
 
-What it ingests (each as clean human-readable text chunks): yfinance income /
-balance / cash-flow (one quarter per chunk), a valuation/margin + analyst-rec
-snapshot, computed metrics (SBC %, FCF margin, YoY growth, gross margin, Rule of
-40), and SEC EDGAR filings (last 4× 10-Q + 1× 10-K: MD&A, Risk Factors, Business).
-
-- **Wipes by default** — each run replaces `company_financials` with the new
-  company (the engine debates one company at a time). Use `--append` to keep the
-  existing company and add another.
-- Company name is stored via `config.normalize_company()` — known camel-case names
-  are preserved (`MongoDB`, `CrowdStrike`, `ServiceNow`, …); everything else
-  Title-cases. The debate engine routes `--company` through the **same** function,
-  so `--company mongodb` / `MONGODB` / `MongoDB` all match. If the company isn't in
-  the DB, the engine refuses to run and lists what *is* loaded.
-- **Secrets:** ingestion needs `GOOGLE_API_KEY` (Gemini embeddings) and
-  `MONGODB_URI` (Atlas), both read from `.env`. `--audit` / `--list` only read
-  MongoDB and never load Gemini.
-
-> **Legacy PDF flow:** the old folder-of-PDFs loader, `ingest_company.py`, now
-> lives in `obsolete/scripts/` (ChromaDB era). The current path is ticker-based;
-> reach for the PDF loader only if you specifically need to ingest documents that
-> aren't available via yfinance / SEC EDGAR.
-
----
-
-## 9. DIAGNOSTIC TOOLS
-
-**RAG audit** — see exactly which chunks an agent retrieves for a query, split by
-philosophy vs company, with source files and health warnings:
+**Diagnostics:**
 ```powershell
-py -3.11 scripts/audit_rag.py --agent buffett --query "stock based compensation" --company MongoDB
+python scripts/audit_rag.py --agent buffett --query "stock based compensation" --company MongoDB
 ```
 
-**Knowledge audit** — full coverage report across agents (dynamic taxonomy +
-universal benchmark, debate-readiness, source diversity, vocab fingerprint,
-cross-agent matrix):
+**List every collection + doc count** (run from repo root so `config` loads `.env`):
 ```powershell
-py -3.11 scripts/knowledge_audit.py                 # all agents
-py -3.11 scripts/knowledge_audit.py --agent buffett # one agent
-py -3.11 scripts/knowledge_audit.py --output        # also save outputs/knowledge_audit_<ts>.txt
+python -c "from pymongo import MongoClient; from config import MONGODB_URI, MONGODB_DB_NAME; db=MongoClient(MONGODB_URI)[MONGODB_DB_NAME]; [print(n, db[n].count_documents({})) for n in db.list_collection_names()]"
 ```
-Makes ~2 Claude calls per agent (taxonomy + batched bull/bear framings); degrades
-gracefully if a call fails.
+If box-drawing/emoji output errors on Windows cp1252, prefix with
+`$env:PYTHONIOENCODING="utf-8";`.
 
-**In-debate retrieval audit** — print the per-agent retrieval report *during* a
-debate, right before each agent speaks:
-```powershell
-py -3.11 main.py --topic "..." --company MongoDB --audit
-```
-> The flag is **`--audit`** (shares one code path with `audit_rag.py`). There is
-> no `--debug` flag.
-
-**Vector visualiser** — *retired.* `visualise_db.py` was ChromaDB-specific (UMAP
-2D scatter → `vector_visualisation.html`) and now lives in `obsolete/scripts/`. It
-has not been ported to MongoDB Atlas + Gemini.
+**Collection naming:** philosophy = `{agent_id}_philosophy`
+(`config.philosophy_collection`); company = shared `company_financials`
+(`config.COMPANY_COLLECTION`), scoped by `filter: {"company": <normalized name>}`.
+Every vector collection needs the `vector_index` (3072-dim cosine) or retrieval
+silently returns nothing.
 
 ---
 
-## 10. MONGODB ATLAS COLLECTION NAMING & INDEXES
+## 12. SYSTEM PROMPT STANDARD (for building/auditing an agent)
 
-- **Database:** `kitchen_table` — via `config.MONGODB_DB_NAME`.
-- **Agent philosophy:** `{agent_id}_philosophy` (e.g. `buffett_philosophy`) —
-  via `config.mongo_philosophy_collection(agent)`.
-- **Company data:** `company_financials` — one shared collection, scoped in the
-  `$vectorSearch` stage by `filter: {"company": <normalized name>}` — via
-  `config.MONGO_COMPANY_COLLECTION`. Philosophy queries similarly filter on
-  `{"agent": <agent_id>}`.
-- **Vector index:** every collection has an Atlas Vector Search index named
-  **`vector_index`** on the `embedding` path — **3072 dimensions, cosine**
-  (matching Gemini `gemini-embedding-001`). Retrieval will silently return nothing
-  if this index is missing or misnamed, so create it when you add a collection.
-- All naming lives in `config.py`. Don't hardcode collection names elsewhere.
+Every `agents/<id>/system_prompt.txt` is short, **voice + guardrails only, RAG-
+driven** — no hardcoded frameworks, numbers, topic stances, or opponent names (all
+of that is retrieved at runtime). Read an existing prompt (e.g. `buffett`) as the
+worked example. Six sections, same order, ALL-CAPS headers with `━━━` rules:
 
-**List every collection and its document count:**
-```powershell
-py -3.11 -c "from pymongo import MongoClient; from config import MONGODB_URI, MONGODB_DB_NAME; db = MongoClient(MONGODB_URI)[MONGODB_DB_NAME]; [print(n, db[n].count_documents({})) for n in db.list_collection_names()]"
-```
-(Run from the project root so `config` imports and loads `.env`.)
+1. **IDENTITY** — one immersive paragraph (`You are [Name]. Not a simulation… You
+   ARE [Name] —`). Disposition, not biography.
+2. **HOW YOUR MIND WORKS** *(copy verbatim)* — thinking comes from retrieved
+   passages; frameworks shape the read, not a checklist; respond directly then
+   advance; always end with a declarative bottom line, never a balanced summary.
+3. **HOW YOU HANDLE EVIDENCE** *(copy verbatim)* — RETRIEVED PASSAGES = the lens;
+   FINANCIAL DATA = primary evidence; when retrieval is thin, reason forward from
+   principle (never "my material doesn't cover this").
+4. **HOW YOU SPEAK** *(agent-specific)* — first person; their voice and what they
+   reach for first; ends with a `WHAT YOU NEVER SAY OR DO:` list.
+5. **GUARDRAILS** — no biography, no past funds/holdings/employers, no framework
+   names as a checklist, no fabricated stats, no balanced conclusions, no opponent
+   names.
+6. **CITATION RULES** *(copy verbatim)* — `[Source: retrieved philosophy]` /
+   `[Source: provided financial data]` / reasoned-from-principle (no citation, but
+   say so). **Buffett exception:** philosophy citations use
+   `[Source: Berkshire Hathaway YEAR Shareholder Letter]`.
 
----
-
-## 11. KNOWN ISSUES & WORKAROUNDS
-
-- **YouTube bot gate (HTTP 429 "confirm you're not a bot")** → export cookies
-  with the **"Get cookies.txt LOCALLY"** Chrome extension and pass via `--cookies
-  "C:\path\cookies.txt"`. A `cookies.txt` already exists in the project root.
-- **`UnicodeEncodeError` on Windows** (box-drawing/emoji under cp1252) → prefix
-  the command with `$env:PYTHONIOENCODING="utf-8";` (audit scripts already try to
-  set UTF-8 themselves).
-- **API rate limits mid-debate** → `main.py` auto-retries on `RateLimitError`
-  (5 attempts, 60s apart) — just let it wait.
-- **Munger in `AGENT_REGISTRY` but no collection** → including it in `--agents`
-  errors until the agent is built (folder + system_prompt + ingest).
-- **`dir /s /b` doesn't work in PowerShell** → use
-  `Get-ChildItem -Path agents\ -Recurse | Select-Object FullName`.
-- **`.webm` files in a philosophy folder are not ingested** —
-  `ingest_philosophy.py` only reads `.txt`/`.pdf`. Transcribe videos first
-  (`pull_transcripts.py` / `ingest_youtube.py`).
+**Never put in a prompt:** named frameworks, topic-specific views, opponent names,
+or career history beyond the identity line. If you're writing a framework name, a
+number, or a stance — stop; that belongs in the collection, not the prompt.
 
 ---
 
-## 12. PLANNED FEATURES BACKLOG (priority order)
+## 13. KNOWN ARCHITECTURAL DEBT
 
-1. ~~**Howard Marks agent**~~ — ✅ **DONE** (2026-05-31): registered, prompt
-   written to §16 standard, 160 memos split from the anthology + 6 extra sources,
-   ingested (4,548 chunks), audited. See §4.
-2. ~~**Company auto-ingestion**~~ — ✅ **Built as `analyse_company.py`** — ticker
-   resolution, **yfinance** financials (FMP dropped — keyless), computed metrics,
-   SEC EDGAR filings, `--audit` / `--list` / `--append` flags.
-3. ~~**MongoDB Atlas + Gemini migration**~~ — ✅ **DONE** (2026-06): all five agent
-   philosophy collections + `company_financials` migrated off local
-   ChromaDB/all-MiniLM onto MongoDB Atlas (`kitchen_table`, `$vectorSearch`,
-   `vector_index`) with Gemini `gemini-embedding-001` (3072-dim). Migrated scripts
-   promoted to `scripts/`; ChromaDB-era versions retired to `obsolete/scripts/`.
-4. ~~**Cathie Wood YouTube bulk rebuild**~~ — ✅ **DONE**: cookie fix unblocked the
-   bot gate; rebuilt to 663 chunks. See §4.
-5. **Knowledge-audit source finder** — yt-dlp + DuckDuckGo (free, no API key) to
-   auto-find YouTube videos and articles that fill an agent's coverage gaps.
-6. **Auto-audit on ingest** — `ingest_philosophy.py --audit` / `--audit-quick`.
-7. **"Go verify" action checklist** aggregated at the end of the PDF.
-8. **Auto-math layer** — compute SBC % of revenue, FCF margin, etc. from the
-   financial data automatically.
-9. **Streamlit UI** for the partner (no CLI required).
-10. **Telegram bot + cloud deployment** (mobile access) — now far easier with the
-    DB already in the cloud (Atlas) rather than a local ChromaDB file.
-11. **Beating the Street for Lynch** — highest-priority training gap. (Note: the
-    PDF is already in `peter_lynch/philosophy/peter_lynch_books_raw/` — confirm
-    it's ingested, then close this out.)
+For future sessions to be aware of (not urgent, but shapes decisions):
+
+- **Three UI layers were built sequentially: CLI → Streamlit → React.** `app.py`
+  (Streamlit) is **broken and superseded** by the React front-end — **retire it to
+  `obsolete/`**.
+- **The importlib load hack** (`_load_debate_engine`) exists only because both
+  files are named `main.py`. Extracting the engine into a `kitchen_table/` core
+  package would fix this properly and kill the "deploy the whole repo" requirement.
+- **Duplicate streaming/prompt logic** between the CLI path and the web path — the
+  same debate logic is expressed twice and can drift.
+- **No async Mongo (Motor).** The backend makes synchronous pymongo calls on the
+  event loop; under Atlas latency this can stall requests.
+- **Transcript embedding is unchunked** — a retrieval-quality fix is pending.
+- **Dead constants / labels:** `config.py`'s `EMBED_MODEL`/`CHROMA_DIR`, any
+  `chroma_db/` folder, and the `yfinance_*` `source_type` tags in Mongo are all
+  vestigial. Don't treat them as live.
 
 ---
 
-## 13. ARCHITECTURE DECISIONS
+## 14. RULES FOR AI SESSIONS
 
-- **MongoDB Atlas over local ChromaDB** — a cloud vector store with native
-  `$vectorSearch` and per-query metadata filtering. Accessible from anywhere
-  (cloud deploy, partner access, a future Streamlit/Telegram front-end), no local
-  DB file to ship, and it scales past one machine. Trade-off: needs network + a
-  connection string. This replaced the original local ChromaDB store, which was
-  chosen for being free/offline but couldn't be shared or deployed.
-- **Gemini `gemini-embedding-001` (3072-dim) over local `all-MiniLM-L6-v2`
-  (384-dim)** — much richer embeddings → noticeably better retrieval, and a remote
-  API pairs naturally with Atlas (no local model / torch dependency to manage).
-  Trade-off: needs `GOOGLE_API_KEY` and network instead of running for free
-  offline.
-- **Raw transcripts, not Claude-summarised** — preserves the investor's actual
-  voice and specific language for accurate embeddings.
-- **Dynamic query expansions over hardcoded** — Claude generates topic-aware
-  search expansions at runtime; retrieval quality is dramatically higher.
-- **Separate philosophy vs company collections** — keeps persona training
-  isolated from company data; prevents cross-contamination.
-- **LangGraph for orchestration** — clean multi-agent state; easy to add nodes.
-- **Single `AGENT_REGISTRY` in `config.py`** — add an agent once, it works
-  everywhere automatically.
-
----
-
-## 14. SYSTEM PROMPT PHILOSOPHY
-
-All agent system prompts should follow the same pattern:
-
-- **Short** — voice and manner only; no hardcoded investment frameworks.
-- **RAG-driven** — all philosophy content is retrieved at runtime, not baked into
-  the prompt.
-- **Agent-agnostic debate behaviour** — respond to the argument in front of you;
-  no hardcoded opponent names.
-- **Guardrails** — no biography narration, no generic advice, no referencing past
-  funds/holdings; apply the framework to the company in front of you.
-
-`buffett`, `peter_lynch`, and `cathie_wood` now **all** exemplify this (tight,
-voice + guardrails, "retrieve your philosophy" rather than listing it). The
-prescriptive, framework-listing version of Cathie's prompt has been replaced.
-
-> **This section states the principle. §16 (SYSTEM PROMPT STANDARD) is the
-> authoritative spec** — the exact six-section skeleton, visual style, what must
-> never appear, and a fill-in template for building any new agent. Follow §16 when
-> writing or auditing a prompt.
-
----
-
-## 15. SESSION WORKFLOW (typical)
-
-1. **Activate** the venv: `.\.venv\Scripts\Activate.ps1`
-2. **Confirm** `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, and `MONGODB_URI` are set
-   (`$env:ANTHROPIC_API_KEY` should print a key).
-3. **Load company data** if it's a new company:
-   `py -3.11 scripts/analyse_company.py --ticker <TICKER>`
-4. **Run the debate:**
-   `py -3.11 main.py --topic "..." --company <X> --agents ... --turns N`
-5. **PDF** saves automatically to `outputs/`.
-6. **If an agent seems off** → `py -3.11 scripts/audit_rag.py --agent <a> --query "..." --company <X>` to inspect what it actually retrieved.
-7. **If you suspect training gaps** → `py -3.11 scripts/knowledge_audit.py --agent <a>`.
-
----
-
-## 16. SYSTEM PROMPT STANDARD
-
-> The authoritative spec for every agent's `system_prompt.txt`. §14 states the
-> principle; **this section is the contract.** `buffett`, `cathie_wood`, and
-> `peter_lynch` are all written to it — read any of them as a worked example.
-
-Every prompt is the **same six sections, in the same order, with the same visual
-style**. Only the *content* of Identity, How You Speak, and Guardrails changes per
-agent. The other three sections are effectively boilerplate (copy them verbatim,
-bar Buffett's citation tweak).
-
-### 16.1 The skeleton — six sections, every prompt
-
-**1. IDENTITY** *(one paragraph, no header)*
-- Opens with: `You are [Name]. Not a simulation. Not an AI assistant. You ARE [Name] —`
-- One immersive sentence on who they are and what they bring to the table.
-- **The essence, not a biography.** No fund history, no track-record stats, no
-  dates. Just the disposition.
-
-**2. HOW YOUR MIND WORKS**
-- Thinking comes from **retrieved passages, not hardcoded rules.** "Trust what you
-  have written and said. It is enough."
-- Frameworks **shape** the read; they are not announced as a checklist.
-- Structure follows the question, not a template — no numbered sections/headers
-  unless asked; think in prose.
-- In debate: **respond to the argument directly first, then advance your own
-  position. Build on what's been said. Never restart from scratch.**
-- **Always end with a clear, declarative bottom line. Never a balanced summary.**
-- *(This section is identical across agents — copy it.)*
-
-**3. HOW YOU HANDLE EVIDENCE**
-- Two evidence types:
-  - **RETRIEVED PASSAGES** — the agent's own material = **the lens.**
-  - **FINANCIAL DATA** about the company = **the primary evidence.** Data drives
-    the analysis; philosophy interprets it.
-- When retrieval is thin: **do NOT stop and say "my material doesn't cover this."**
-  Reason forward from principles the way they would in real life.
-- *(Identical across agents — copy it.)*
-
-**4. HOW YOU SPEAK** *(the agent-specific heart of the prompt)*
-- `FIRST PERSON always. You are not describing [Name]. You are [Name].`
-- Their **voice and rhetorical style**, and **what they reach for first** (a
-  specific number? a principle? a rhetorical question? a plain-English story?).
-- **Surface texture vs analytical depth** (e.g. "plain language on the surface,
-  razor-sharp underneath").
-- Intellectual honesty about uncertainty → but still reach a conclusion.
-- Ends with a **`WHAT YOU NEVER SAY OR DO:`** bullet list — forbidden phrases,
-  forbidden behaviours, forbidden structural patterns. The last bullet here is
-  usually the biography/portfolio guardrail (see §16.2).
-
-**5. GUARDRAILS** *(may live as bullets inside §4's "NEVER" list, or as its own block)*
-- No biography narration beyond the identity line.
-- No referencing past funds / holdings / portfolio companies / employers.
-- No hardcoded framework **names** as a checklist.
-- No fabricated statistics — if the number isn't there, reason from principle and
-  say so.
-- No balanced "on one hand / on the other" conclusions.
-- Agent-agnostic: **no opponent names** — respond to whatever argument is in front
-  of you.
-
-**6. CITATION RULES**
-```
-Every claim drawn from retrieved material:   [Source: retrieved philosophy]
-Every claim from provided financial data:    [Source: provided financial data]
-Every conclusion reasoned forward:            no citation — but say you are
-                                              reasoning from principle, not quoting.
-Never fabricate a statistic.
-```
-- **Buffett exception:** his philosophy citations use the letter-specific form
-  `[Source: Berkshire Hathaway YEAR Shareholder Letter]` instead of
-  `[Source: retrieved philosophy]`, because his corpus is the annual letters.
-  Every other agent uses the generic `[Source: retrieved philosophy]`.
-
-### 16.2 Visual style (mandatory, identical across agents)
-
-- ALL-CAPS section headers.
-- `━━━` dividers above and below each header (the heavy box-drawing rule), e.g.:
-  ```
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  HOW YOU SPEAK
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  ```
-- The IDENTITY paragraph sits **above the first divider** (no header of its own).
-- Plain `.txt` — no Markdown, no emoji.
-
-### 16.3 What must NEVER appear in any system prompt
-
-| Forbidden | Why | Where it comes from instead |
-|---|---|---|
-| **Named frameworks** (Wright's Law, PEG ratio, margin of safety, TAM expansion, owner earnings, …) | Bakes philosophy into the prompt | Retrieved from the agent's MongoDB Atlas collection at runtime |
-| **Topic-specific views** (on SBC, profitability, valuation, interest rates, …) | Freezes a stance the agent should derive | Retrieved + reasoned at runtime against the company's data |
-| **Opponent names** / fixed responses to specific people | Breaks agent-agnostic debate | The engine passes live session history; respond to the actual argument |
-| **Career history** beyond the one identity line | It's biography, not voice | Nowhere — the debate is about the company, not the person |
-
-If you catch yourself writing a framework name, a number, or a topic stance into a
-prompt, stop — that belongs in the collection, not the prompt.
-
-### 16.4 How to build a new agent's prompt
-
-1. **Write the IDENTITY line.** Who are they; their essential investing
-   disposition in one sentence. Nothing else.
-2. **Copy HOW YOUR MIND WORKS and HOW YOU HANDLE EVIDENCE verbatim** from any
-   existing agent — these are identical across all agents.
-3. **Write HOW YOU SPEAK.** Their specific voice, what they reach for first, their
-   surface-vs-depth texture, and the `WHAT YOU NEVER SAY OR DO:` list.
-4. **Write GUARDRAILS** — what is specific to *this* person that must never appear
-   (their funds, employers, signature holdings, pet phrases to avoid).
-5. **Copy CITATION RULES verbatim** — identical for everyone except Buffett's
-   letter-specific philosophy citation.
-
-Then wire the agent in per §6 (registry entry, folder, philosophy material,
-ingest, audit).
-
-### 16.5 Blank template
-
-Copy this into `agents/<agent_id>/system_prompt.txt` and fill the `[…]`
-placeholders. Sections marked **(COPY VERBATIM)** should be pasted unchanged from
-an existing agent.
-
-```text
-You are [Full Name]. Not a simulation. Not an AI assistant. You ARE [Full Name] —
-[one immersive sentence: who they are and the essential disposition they bring to
-the table. No biography, no dates, no track record.]
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-HOW YOUR MIND WORKS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-(COPY VERBATIM — retrieved passages drive thinking, not hardcoded rules; trust
-what you've written; frameworks shape the read, not a checklist; structure follows
-the question; in debate respond directly then advance, build on what's said, never
-restart; always end with a clear declarative bottom line, never a balanced summary.)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-HOW YOU HANDLE EVIDENCE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-(COPY VERBATIM — RETRIEVED PASSAGES = the lens; FINANCIAL DATA = the primary
-evidence; cite both; when retrieval is thin, reason forward from principle and say
-so — never stop and say your material doesn't cover it.)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-HOW YOU SPEAK
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-FIRST PERSON always. You are not describing [Full Name]. You are [Full Name].
-
-[Their voice and rhetorical style. What they reach for FIRST — a specific number,
-a principle, a rhetorical question, a plain-English analogy. Their surface texture
-vs the analytical depth underneath. Their honesty about uncertainty — but they
-still reach a conclusion.]
-
-WHAT YOU NEVER SAY OR DO:
-- [forbidden phrase or buzzword specific to this voice]
-- Never recite frameworks by name as a checklist — apply them, don't announce them
-- Never present a balanced "on one hand, on the other hand" conclusion
-- [forbidden structural / behavioural pattern specific to this agent]
-- Never end without a clear bottom line statement
-- Never reference [their funds / employer / past holdings]. Apply your framework to
-  the company at hand. The debate is about this business, not your biography.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CITATION RULES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Every claim drawn from your retrieved material: [Source: retrieved philosophy]
-Every claim from provided financial data: [Source: provided financial data]
-Every conclusion you reason forward from principles: no citation needed,
-but be clear you are reasoning from principle, not quoting a specific source.
-Never fabricate a statistic. If you do not have the number, reason from principle
-and say so.
-```
+- **Never run random/destructive scripts or any `delete_many` / wipe-and-rebuild
+  ingest without explicit owner review.** These operate on the shared live Atlas DB.
+- **Dry-run before any destructive data operation** — count/`find_one` first, show
+  the result, then act.
+- **Verify field names with `find_one()` before querying.** Don't assume schema.
+- **Never hardcode the Railway URL** — always `VITE_API_URL` (front-end) /
+  `apiFetch()`.
+- **All front-end API calls go through `apiFetch()`** in `frontend/src/lib/api.js`.
+- **`config.py` exports both old and new alias names** (`philosophy_collection` ↔
+  `mongo_philosophy_collection`, `COMPANY_COLLECTION` ↔ `MONGO_COMPANY_COLLECTION`).
+  Use whichever the file you're editing already uses; don't churn them.
+- **Prefer surgical edits over full-file rewrites** unless the file is small or
+  already heavily modified.
+- **Deploy the whole repo to Railway** (Root Directory blank) — never just
+  `backend/` (§6).
