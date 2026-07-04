@@ -1034,17 +1034,18 @@ async def start_debate(req: DebateRequest):
             # The engine's async generator drives SYNCHRONOUS Anthropic streaming
             # (messages.stream(), not messages.astream()), so iterating it directly
             # on the event loop would block it. Run the generator in a worker thread
-            # with its own event loop and bridge its events back over a queue.
-            import queue
+            # with its own event loop and bridge its events back over an asyncio
+            # queue via the FastAPI loop's thread-safe scheduler (same pattern as
+            # the ingest path above) — awaiting the queue never blocks the loop.
             import threading
 
-            event_queue = queue.Queue()
+            event_queue: asyncio.Queue = asyncio.Queue()
 
             def run_generator():
                 try:
                     import asyncio as _asyncio
-                    loop = _asyncio.new_event_loop()
-                    _asyncio.set_event_loop(loop)
+                    worker_loop = _asyncio.new_event_loop()
+                    _asyncio.set_event_loop(worker_loop)
 
                     async def _collect():
                         async for event in engine.stream_debate_round(
@@ -1056,21 +1057,24 @@ async def start_debate(req: DebateRequest):
                             session_history=req.session_history,
                             audit=False,
                         ):
-                            event_queue.put(event)
+                            loop.call_soon_threadsafe(event_queue.put_nowait, event)
 
-                    loop.run_until_complete(_collect())
+                    worker_loop.run_until_complete(_collect())
                 except Exception as e:
-                    event_queue.put({"type": "error", "message": str(e)})
+                    loop.call_soon_threadsafe(
+                        event_queue.put_nowait,
+                        {"type": "error", "message": str(e)},
+                    )
                 finally:
-                    event_queue.put(None)  # sentinel
+                    loop.call_soon_threadsafe(event_queue.put_nowait, None)  # sentinel
 
             thread = threading.Thread(target=run_generator, daemon=True)
             thread.start()
 
             while True:
                 try:
-                    event = event_queue.get(timeout=300)
-                except queue.Empty:
+                    event = await asyncio.wait_for(event_queue.get(), timeout=300)
+                except asyncio.TimeoutError:
                     yield f"data: {json.dumps({'type': 'error', 'message': 'Timeout'})}\n\n"
                     break
                 if event is None:
