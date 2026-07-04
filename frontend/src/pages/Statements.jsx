@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import Sidebar from "../components/TickerBar";
+import { apiFetch, API_BASE } from "../lib/api";
 
 // Statements.jsx — full financial statements for /company/:ticker/statements.
 // Same editorial shell as Company.jsx. Three statement tabs (income / balance /
@@ -8,8 +9,6 @@ import Sidebar from "../components/TickerBar";
 // only). The table is built ENTIRELY from whatever fields the company reports:
 // the backend /statements endpoint returns raw FMP rows (+ a periodLabel), and we
 // map field keys → rows dynamically (oldest period left, newest right).
-
-const API = "https://investors-of-the-kitchen-table-production.up.railway.app";
 
 const TABS = [
   { k: "income", label: "Income Statement" },
@@ -148,7 +147,7 @@ function ResearchModal({ ticker, symbol, companyName, onClose }) {
       setDownloadId(evt.download_id);
       setStatus("ready");
       // Trigger the browser download of the finished ZIP.
-      window.location.href = `${API}/company/${ticker}/download-research/${evt.download_id}`;
+      window.location.href = `${API_BASE}/company/${ticker}/download-research/${evt.download_id}`;
     } else if (evt.type === "error") {
       setStatus("error");
       setErrorMessage(evt.message || "Failed to build package.");
@@ -168,7 +167,7 @@ function ResearchModal({ ticker, symbol, companyName, onClose }) {
     setDownloadId(null);
 
     try {
-      const response = await fetch(`${API}/company/${ticker}/prepare-research`, {
+      const response = await apiFetch(`/company/${ticker}/prepare-research`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ years: effectiveYears }),
@@ -374,7 +373,7 @@ export default function Statements() {
 
   // Company name / exchange — once per ticker.
   useEffect(() => {
-    fetch(`${API}/company/${ticker}/profile`)
+    apiFetch(`/company/${ticker}/profile`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => setProfile(d))
       .catch(() => setProfile(null));
@@ -384,7 +383,7 @@ export default function Statements() {
   useEffect(() => {
     let cancelled = false;
     setStatus("loading");
-    fetch(`${API}/company/${ticker}/statements?type=${tab}&period=${period}`)
+    apiFetch(`/company/${ticker}/statements?type=${tab}&period=${period}`)
       .then((r) => {
         if (!r.ok) throw new Error("not ok");
         return r.json();

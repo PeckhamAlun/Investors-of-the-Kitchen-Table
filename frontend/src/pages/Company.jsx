@@ -10,14 +10,13 @@ import {
   Tooltip,
 } from "recharts";
 import Sidebar from "../components/TickerBar";
+import { apiFetch } from "../lib/api";
 
 // Company.jsx — equity research overview for /company/:ticker. Editorial TIKT
 // look: cream page, white cards with hairline green borders, Playfair Display
 // headings, gold accents. Profile, price history, key metrics and the financial
 // table are all loaded live from the FastAPI backend; each section loads
 // independently so the page shell renders immediately.
-
-const API = "https://investors-of-the-kitchen-table-production.up.railway.app";
 
 const RANGES = ["1W", "1M", "YTD", "1Y", "3Y", "5Y", "10Y", "Max"];
 
@@ -125,7 +124,7 @@ export default function Company() {
   // non-OK status such as a 404 for an unknown ticker) flips the error state.
   useEffect(() => {
     setError(null);
-    fetch(`${API}/company/${ticker}/profile`)
+    apiFetch(`/company/${ticker}/profile`)
       .then((r) => {
         if (!r.ok) throw new Error("not ok");
         return r.json();
@@ -140,7 +139,7 @@ export default function Company() {
   // Price history — refetches whenever the ticker or selected range changes.
   useEffect(() => {
     setLoading((l) => ({ ...l, chart: true }));
-    fetch(`${API}/company/${ticker}/price-history?range=${timeRange}`)
+    apiFetch(`/company/${ticker}/price-history?range=${timeRange}`)
       .then((r) => r.json())
       .then((d) => {
         setPriceHistory(d);
@@ -151,7 +150,7 @@ export default function Company() {
 
   // Key metrics — on mount / ticker change.
   useEffect(() => {
-    fetch(`${API}/company/${ticker}/metrics`)
+    apiFetch(`/company/${ticker}/metrics`)
       .then((r) => r.json())
       .then((d) => {
         setMetrics(d);
@@ -162,7 +161,7 @@ export default function Company() {
 
   // Financial statements — on mount / ticker change.
   useEffect(() => {
-    fetch(`${API}/company/${ticker}/financials`)
+    apiFetch(`/company/${ticker}/financials`)
       .then((r) => r.json())
       .then((d) => {
         setFinancials(d);

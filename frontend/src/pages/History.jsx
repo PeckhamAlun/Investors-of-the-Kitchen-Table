@@ -1,14 +1,13 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import Sidebar from "../components/TickerBar";
+import { apiFetch } from "../lib/api";
 
 // History.jsx — /history. A global list of every past debate session across all
 // companies, grouped by ticker, in the TIKT editorial look (cream page, Playfair
 // heading, gold accents). Clicking a card resumes that saved session: it opens
 // /debate/:ticker with { resume: true, session_id } in router state, and Debate.jsx
 // rebuilds the full transcript from stored history.
-
-const API = "https://investors-of-the-kitchen-table-production.up.railway.app";
 
 // Known agent id → display name (mirrors Debate.jsx). Unknown ids title-case.
 const AGENT_NAMES = {
@@ -73,7 +72,7 @@ export default function History() {
   const [deleteError, setDeleteError] = useState(null);
 
   useEffect(() => {
-    fetch(`${API}/debates`)
+    apiFetch(`/debates`)
       .then((r) => {
         if (!r.ok) throw new Error("not ok");
         return r.json();
@@ -93,7 +92,7 @@ export default function History() {
   // inline error on that card.
   const handleDelete = async (sessionId) => {
     try {
-      const res = await fetch(`${API}/debate/${encodeURIComponent(sessionId)}`, {
+      const res = await apiFetch(`/debate/${encodeURIComponent(sessionId)}`, {
         method: "DELETE",
       });
       if (!res.ok) throw new Error("delete failed");

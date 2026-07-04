@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { apiFetch } from "../lib/api";
 
 // Debate.jsx — /debate/:ticker. Two phases:
 //   PHASE 1 (status idle | ingesting): a full-width setup screen where the user
@@ -9,8 +10,6 @@ import { useLocation, useNavigate, useParams } from "react-router-dom";
 //   PHASE 2 (status running | complete | error): the live transcript — a 70%
 //     transcript panel + 30% session sidebar — streamed token-by-token over SSE.
 // Editorial TIKT look throughout: cream page, Playfair headings, gold accents.
-
-const API = "https://investors-of-the-kitchen-table-production.up.railway.app";
 
 // Default roster (all selected on first render).
 const DEFAULT_AGENTS = [
@@ -445,7 +444,7 @@ export default function Debate() {
     };
 
     try {
-      const response = await fetch(`${API}/debate/start`, {
+      const response = await apiFetch(`/debate/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -550,7 +549,7 @@ export default function Debate() {
       form.append("file", fileObj);
       form.append("ticker", symbol);
       form.append("company", company);
-      const res = await fetch(`${API}/company/${symbol}/upload-document`, {
+      const res = await apiFetch(`/company/${symbol}/upload-document`, {
         method: "POST",
         body: form,
       });
@@ -618,7 +617,7 @@ export default function Debate() {
   useEffect(() => {
     if (!isResume || !resumeSessionId) return;
     let cancelled = false;
-    fetch(`${API}/debate/${resumeSessionId}`)
+    apiFetch(`/debate/${resumeSessionId}`)
       .then((r) => {
         if (!r.ok) throw new Error("not ok");
         return r.json();

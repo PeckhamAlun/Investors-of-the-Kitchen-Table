@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { apiFetch } from "../lib/api";
 
 // SearchBar.jsx — the Home hero search from the TIKT design: a wide input with
 // a magnifier icon on the left and a green "Research →" button inside on the
@@ -8,8 +9,6 @@ import { useEffect, useRef, useState } from "react";
 // chars, debounced 300ms) it hits the backend /search proxy and lists matching
 // tickers. Selecting a result (click, or Enter on a highlighted row) calls
 // onSearch with that symbol; plain Enter / the button submit the typed text.
-
-const API = "https://investors-of-the-kitchen-table-production.up.railway.app";
 
 export default function SearchBar({ onSearch }) {
   const [inputValue, setInputValue] = useState("");
@@ -57,7 +56,7 @@ export default function SearchBar({ onSearch }) {
     setLoading(true);
     setShowDropdown(true);
     debounceRef.current = setTimeout(() => {
-      fetch(`${API}/search?query=${encodeURIComponent(q)}`)
+      apiFetch(`/search?query=${encodeURIComponent(q)}`)
         .then((r) => r.json())
         .then((d) => {
           setResults(Array.isArray(d) ? d : []);

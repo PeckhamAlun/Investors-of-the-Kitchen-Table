@@ -8,8 +8,7 @@
 // the bar rendered immediately — no loading state; real values swap in on arrival.
 
 import { useEffect, useState } from "react";
-
-const API = "https://investors-of-the-kitchen-table-production.up.railway.app";
+import { apiFetch } from "../lib/api";
 
 // Hardcoded placeholders — shown immediately on first paint, then replaced by the
 // live /market-data response. Shape matches the endpoint: { name, price, change }.
@@ -64,7 +63,7 @@ export default function MarketTicker() {
   // Fetch live market data once on mount. On any failure (network/parse) the
   // placeholders simply stay in place — there is no separate loading state.
   useEffect(() => {
-    fetch(`${API}/market-data`)
+    apiFetch(`/market-data`)
       .then((r) => r.json())
       .then((d) => {
         if (Array.isArray(d) && d.length > 0) {
