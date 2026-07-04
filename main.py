@@ -908,26 +908,46 @@ def _gv_keywords(question: str) -> set[str]:
 
 def _collect_go_verify(all_rounds: list[dict]) -> dict[str, list[str]]:
     """Extract every 'Go verify' question across all rounds, dedupe by shared
-    keywords, and group into research categories for the checklist page."""
+    keywords, and group into research categories for the checklist page.
+
+    Captures both the same-line form ("Go verify: <q>") and the multi-line form
+    the agent prompt actually asks for — a "Go verify:" trigger followed by each
+    question on its own '-'/'•' bullet line, until a blank line or a non-bullet
+    section header ends the block."""
     questions: list[str] = []
+
+    def emit(text: str) -> None:
+        text = re.sub(r"^[\s:\*–—\-•]+", "", text).strip()
+        if not text:
+            return
+        if "?" in text:
+            for part in text.split("?"):
+                part = part.strip(" ;,*-—–•")
+                if len(part) > 3:
+                    questions.append(f"{part}?")
+        else:
+            questions.append(text)
+
     for rnd in all_rounds:
         for h in rnd["history"]:
             if h["agent"] == "synthesis":
                 continue
-            for line in h["response"].split("\n"):
-                idx = line.lower().find("go verify")
+            lines = h["response"].split("\n")
+            i = 0
+            while i < len(lines):
+                idx = lines[i].lower().find("go verify")
                 if idx == -1:
+                    i += 1
                     continue
-                rest = re.sub(r"^[\s:\*–—\-]+", "", line[idx + len("go verify"):]).strip()
-                if not rest:
-                    continue
-                if "?" in rest:
-                    for part in rest.split("?"):
-                        part = part.strip(" ;,*-—–")
-                        if len(part) > 3:
-                            questions.append(f"{part}?")
-                else:
-                    questions.append(rest)
+                emit(lines[i][idx + len("go verify"):])   # same-line remainder
+                j = i + 1
+                while j < len(lines):
+                    nxt = lines[j].strip()
+                    if not nxt or nxt[0] not in "-•":       # blank or section header ends the block
+                        break
+                    emit(nxt)
+                    j += 1
+                i = j
 
     # Dedupe: drop any question sharing >= 3 significant keywords with an earlier one
     kept: list[str] = []
