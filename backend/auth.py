@@ -12,6 +12,7 @@ _USERS = [
     ("PECKHAM_KEY", {"owner": "peckham", "name": "Peckham Alun", "initials": "PA", "colour": "#1B4332"}),
     ("DARIUS_KEY",  {"owner": "darius",  "name": "Darius",       "initials": "D",  "colour": "#C9A84C"}),
     ("ROYDEN_KEY",  {"owner": "royden",  "name": "Royden",       "initials": "R",  "colour": "#23543F"}),
+    ("MASTER_KEY",  {"owner": "master",  "name": "Kitchen Table", "initials": "KT"}),
 ]
 
 
