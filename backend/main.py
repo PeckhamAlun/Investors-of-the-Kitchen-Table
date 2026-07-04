@@ -958,6 +958,10 @@ class DebateRequest(BaseModel):
 
 @app.post("/debate/start")
 async def start_debate(req: DebateRequest, _user: dict = Depends(get_current_user)):
+    # Capture the owner before the SSE generator starts. It is stamped onto the
+    # debate document once, at creation, so per-user history filtering works.
+    owner = _user["owner"]
+
     async def event_stream():
         try:
             # Load the project-root debate engine under a distinct module name so
@@ -1123,6 +1127,7 @@ async def start_debate(req: DebateRequest, _user: dict = Depends(get_current_use
                         debate_doc = {
                             "_id": session_id,
                             "session_id": session_id,
+                            "owner": owner,
                             "ticker": req.ticker.upper(),
                             "company": company_key,
                             "topic": req.topic,
@@ -1176,10 +1181,13 @@ async def delete_debate(session_id: str, _user: dict = Depends(get_current_user)
 
 
 @app.get("/debates")
-async def list_all_debates():
+async def list_all_debates(current_user: dict = Depends(get_current_user)):
     db = get_mongo_db()
+    # master sees every debate; everyone else sees only their own. Legacy docs
+    # (no owner field) never match {"owner": <user>}, so they stay private.
+    query = {} if current_user["owner"] == "master" else {"owner": current_user["owner"]}
     docs = list(db["debates"].find(
-        {},
+        query,
         {
             "session_id": 1,
             "ticker": 1,
@@ -1195,10 +1203,14 @@ async def list_all_debates():
 
 
 @app.get("/debates/{ticker}")
-async def list_debates(ticker: str):
+async def list_debates(ticker: str, current_user: dict = Depends(get_current_user)):
     db = get_mongo_db()
+    # Scope to the ticker, then to the caller — unless master, who sees all owners.
+    query = {"ticker": ticker.upper()}
+    if current_user["owner"] != "master":
+        query["owner"] = current_user["owner"]
     docs = list(db["debates"].find(
-        {"ticker": ticker.upper()},
+        query,
         {"session_id": 1, "topic": 1, "created_at": 1, "agents": 1, "_id": 0}
     ).sort("created_at", -1).limit(20))
     return docs
