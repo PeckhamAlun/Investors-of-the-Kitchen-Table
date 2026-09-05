@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import Sidebar from "../components/TickerBar";
-import { apiFetch } from "../lib/api";
+import { apiFetch, API_BASE } from "../lib/api";
 
 // History.jsx — /history. A global list of every past debate session across all
 // companies, grouped by ticker, in the TIKT editorial look (cream page, Playfair
@@ -110,10 +110,10 @@ export default function History() {
   return (
     <div className="flex min-h-0 w-full flex-1 overflow-hidden font-sans text-tikt-ink">
       <Sidebar />
-      <main className="flex-1 overflow-y-auto bg-tikt-cream">
+      <main className="flex-1 overflow-y-auto bg-tikt-bg">
         <div className="mx-auto w-full max-w-[920px] px-10 pb-24 pt-10">
           {/* header */}
-          <h1 className="font-display text-[32px] font-bold leading-tight text-tikt-green">
+          <h1 className="text-[32px] font-bold leading-tight text-tikt-ink">
             Debate History
           </h1>
           <p className="mt-1 text-[14px] text-tikt-muted">
@@ -122,7 +122,7 @@ export default function History() {
 
           {/* states */}
           {loading && (
-            <div className="mt-12 text-[13px] text-tikt-green/50">Loading…</div>
+            <div className="mt-12 text-[13px] text-tikt-muted">Loading…</div>
           )}
 
           {!loading && error && (
@@ -142,7 +142,7 @@ export default function History() {
             <div className="mt-10 flex flex-col gap-9">
               {groups.map((g) => (
                 <section key={g.ticker}>
-                  <div className="mb-3 text-[12px] font-bold uppercase tracking-[1.5px] text-tikt-gold">
+                  <div className="mb-3 text-[11px] font-semibold uppercase tracking-[1.5px] text-tikt-green">
                     {g.company ? `${g.company} · ${g.ticker}` : g.ticker}
                   </div>
 
@@ -164,7 +164,7 @@ export default function History() {
                               },
                             })
                           }
-                          className="group relative cursor-pointer rounded-lg border-[0.5px] border-tikt-green/15 bg-white p-4 transition hover:border-tikt-gold hover:shadow-[0_8px_22px_rgba(64,52,24,0.08)]"
+                          className="group relative cursor-pointer rounded-lg border border-tikt-border bg-tikt-surface p-4 transition hover:border-tikt-green"
                         >
                           {/* delete control — hover-reveal trash (×) with a confirm step */}
                           <div
@@ -172,8 +172,8 @@ export default function History() {
                             onClick={(e) => e.stopPropagation()}
                           >
                             {confirmId === d.session_id ? (
-                              <div className="flex items-center gap-2 rounded-md border-[0.5px] border-tikt-green/15 bg-white px-2.5 py-1.5 shadow-[0_8px_22px_rgba(64,52,24,0.12)]">
-                                <span className="text-[12px] text-tikt-green">
+                              <div className="flex items-center gap-2 rounded-md border border-tikt-border bg-tikt-panel px-2.5 py-1.5">
+                                <span className="text-[12px] text-tikt-ink">
                                   Delete this debate?
                                 </span>
                                 <button
@@ -182,7 +182,7 @@ export default function History() {
                                     e.stopPropagation();
                                     handleDelete(d.session_id);
                                   }}
-                                  className="text-[12px] font-semibold text-red-600 hover:text-red-700"
+                                  className="text-[12px] font-semibold text-tikt-neg hover:opacity-80"
                                 >
                                   Delete
                                 </button>
@@ -192,39 +192,57 @@ export default function History() {
                                     e.stopPropagation();
                                     setConfirmId(null);
                                   }}
-                                  className="text-[12px] font-medium text-tikt-muted hover:text-tikt-green"
+                                  className="text-[12px] font-medium text-tikt-muted hover:text-tikt-ink"
                                 >
                                   Cancel
                                 </button>
                               </div>
                             ) : deleteError === d.session_id ? (
-                              <span className="rounded-md bg-red-50 px-2 py-1 text-[11px] font-medium text-red-600">
+                              <span className="rounded-md bg-tikt-neg/10 px-2 py-1 text-[11px] font-medium text-tikt-neg">
                                 Could not delete. Try again.
                               </span>
                             ) : (
-                              <button
-                                type="button"
-                                aria-label="Delete debate"
-                                title="Delete debate"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setDeleteError(null);
-                                  setConfirmId(d.session_id);
-                                }}
-                                className="flex h-6 w-6 items-center justify-center rounded-full text-[18px] leading-none text-red-500 opacity-0 transition hover:bg-red-50 hover:text-red-600 group-hover:opacity-100"
-                              >
-                                ×
-                              </button>
+                              <div className="flex items-center gap-1">
+                                {/* download this debate as a PDF (new tab) */}
+                                <button
+                                  type="button"
+                                  aria-label="Download PDF"
+                                  title="Download as PDF"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    window.open(
+                                      `${API_BASE}/debate/${d.session_id}/export-pdf`,
+                                      "_blank"
+                                    );
+                                  }}
+                                  className="flex h-6 w-6 items-center justify-center rounded-full text-[13px] leading-none text-tikt-green opacity-0 transition hover:bg-tikt-green/10 group-hover:opacity-100"
+                                >
+                                  ↓
+                                </button>
+                                <button
+                                  type="button"
+                                  aria-label="Delete debate"
+                                  title="Delete debate"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setDeleteError(null);
+                                    setConfirmId(d.session_id);
+                                  }}
+                                  className="flex h-6 w-6 items-center justify-center rounded-full text-[18px] leading-none text-tikt-neg opacity-0 transition hover:bg-tikt-neg/10 group-hover:opacity-100"
+                                >
+                                  ×
+                                </button>
+                              </div>
                             )}
                           </div>
 
                           <div className="flex items-start justify-between gap-4 pr-7">
-                            <div className="text-[15px] font-medium leading-snug text-tikt-green">
+                            <div className="text-[15px] font-medium leading-snug text-tikt-ink">
                               {d.topic ||
                                 `Is ${d.ticker} a good investment?`}
                             </div>
                             {rounds > 1 && (
-                              <span className="flex-shrink-0 rounded-full bg-tikt-gold/15 px-2 py-0.5 text-[11px] font-semibold text-tikt-gold">
+                              <span className="flex-shrink-0 rounded-full bg-tikt-green/10 px-2 py-0.5 text-[11px] font-semibold text-tikt-green">
                                 {rounds} rounds
                               </span>
                             )}
@@ -237,14 +255,14 @@ export default function History() {
                                 <span
                                   key={a}
                                   title={displayName(a)}
-                                  className="flex h-7 w-7 items-center justify-center rounded-full bg-tikt-gold text-[11px] font-bold text-tikt-green"
+                                  className="flex h-7 w-7 items-center justify-center rounded-full bg-tikt-hover text-[11px] font-bold text-tikt-muted"
                                 >
                                   {initials(displayName(a))}
                                 </span>
                               ))}
                             </div>
 
-                            <div className="text-[12px] text-tikt-faint">
+                            <div className="text-[12px] text-tikt-muted">
                               {formatDate(d.created_at)}
                             </div>
                           </div>

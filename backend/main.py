@@ -1170,6 +1170,76 @@ async def get_debate(session_id: str):
     return doc
 
 
+@app.get("/debate/{session_id}/export-pdf")
+async def export_debate_pdf(session_id: str):
+    # No auth dependency: the frontend opens this via window.open(), which cannot
+    # attach the Authorization header. Consistent with GET /debate/{session_id} —
+    # the unguessable UUID session_id is the guard.
+    db = get_mongo_db()
+    doc = db["debates"].find_one({"session_id": session_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Debate not found")
+
+    try:
+        # The engine's module-level init blocks — load it off the event loop
+        # (same pattern as start_debate).
+        import concurrent.futures
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            engine = await loop.run_in_executor(pool, _load_debate_engine)
+
+        history = doc.get("history") or []
+        agents = doc.get("agents") or []
+        company = doc.get("company")
+        turns = doc.get("turns", 1)
+        topic = doc.get("topic") or f"Is {doc.get('ticker', '')} a good investment?"
+
+        # Rebuild all_rounds = [{round, topic, title, history}] from the flat stored
+        # history by grouping on each entry's `round` (mirrors main.py's CLI loop).
+        from collections import defaultdict
+        by_round = defaultdict(list)
+        for h in history:
+            by_round[h.get("round", 1)].append(h)
+
+        all_rounds = []
+        for rnd in sorted(by_round.keys()):
+            round_history = by_round[rnd]
+            # Per-round topic is stored on each entry; fall back to the doc topic.
+            round_topic = next(
+                (h.get("topic") for h in round_history if h.get("topic")), topic
+            )
+            all_rounds.append({
+                "round": rnd,
+                "topic": round_topic,
+                "title": round_topic,
+                "history": round_history,
+            })
+
+        if not all_rounds:
+            raise HTTPException(
+                status_code=404, detail="Debate has no content to export"
+            )
+
+        # save_pdf is synchronous (ReportLab + a Mongo snapshot query) — run it off
+        # the event loop too.
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            out_path = await loop.run_in_executor(
+                pool, engine.save_pdf, all_rounds, agents, company, turns
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {e}")
+
+    ticker = (doc.get("ticker") or "DEBATE").upper()
+    date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
+    return FileResponse(
+        out_path,
+        media_type="application/pdf",
+        filename=f"{ticker}_{date_str}_debate.pdf",
+    )
+
+
 @app.delete("/debate/{session_id}")
 async def delete_debate(session_id: str, _user: dict = Depends(get_current_user)):
     db = get_mongo_db()

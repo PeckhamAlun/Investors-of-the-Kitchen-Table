@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
-import { apiFetch } from "../lib/api";
+import { apiFetch, API_BASE } from "../lib/api";
 
 // Debate.jsx — /debate/:ticker. Two phases:
 //   PHASE 1 (status idle | ingesting): a full-width setup screen where the user
@@ -111,7 +111,7 @@ function renderResponse(text, showCursor) {
     const isBullet = trimmed.startsWith("- ") || trimmed.startsWith("* ");
     const cursor =
       showCursor && idx === lastIdx ? (
-        <span className="animate-pulse text-tikt-gold">▋</span>
+        <span className="animate-pulse text-tikt-green">▋</span>
       ) : null;
 
     // "Go verify:" header — muted italic; opens a muted checklist block.
@@ -120,7 +120,7 @@ function renderResponse(text, showCursor) {
       return (
         <p
           key={idx}
-          className="mt-2 text-[13px] italic leading-[1.6] text-tikt-green/50"
+          className="mt-2 text-[13px] italic leading-[1.6] text-tikt-muted"
         >
           {trimmed}
           {cursor}
@@ -133,14 +133,14 @@ function renderResponse(text, showCursor) {
       // Go-verify bullets stay smaller and muted; regular bullets take the
       // larger body size with more generous line height.
       const cls = inGoVerify
-        ? "mt-1 flex gap-2 text-[13px] leading-[1.6] italic text-tikt-green/50"
-        : "mt-1 flex gap-2 text-[15px] leading-7 text-tikt-green";
+        ? "mt-1 flex gap-2 text-[13px] leading-[1.6] italic text-tikt-muted"
+        : "mt-1 flex gap-2 text-[15px] leading-7 text-tikt-ink";
       return (
         <div
           key={idx}
           className={cls}
         >
-          <span className="text-tikt-gold">•</span>
+          <span className="text-tikt-green">•</span>
           <span>
             <span dangerouslySetInnerHTML={{ __html: renderInline(content) }} />
             {cursor}
@@ -165,7 +165,7 @@ function renderResponse(text, showCursor) {
       return (
         <p
           key={idx}
-          className="mt-4 text-[16px] font-bold leading-7 text-tikt-green"
+          className="mt-4 text-[16px] font-bold leading-7 text-tikt-ink"
         >
           <span
             dangerouslySetInnerHTML={{ __html: renderInline(headingMatch[1]) }}
@@ -178,7 +178,7 @@ function renderResponse(text, showCursor) {
     // A normal paragraph line ends any open Go-verify block.
     inGoVerify = false;
     return (
-      <p key={idx} className="mt-2 text-[15px] leading-7 text-tikt-green">
+      <p key={idx} className="mt-2 text-[15px] leading-7 text-tikt-ink">
         <span dangerouslySetInnerHTML={{ __html: renderInline(line) }} />
         {cursor}
       </p>
@@ -196,12 +196,12 @@ function SourcesSection({ sources }) {
   const extra = sources.length - SOURCES_MAX;
 
   return (
-    <div className="mt-3 border-t border-tikt-green/10 pt-2">
+    <div className="mt-3 border-t border-tikt-border pt-2">
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
         aria-expanded={expanded}
-        className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[1.5px] text-tikt-gold/70 hover:text-tikt-gold"
+        className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[1.5px] text-tikt-green/70 hover:text-tikt-green"
       >
         <span
           className={`inline-block transition-transform ${
@@ -219,15 +219,15 @@ function SourcesSection({ sources }) {
               key={idx}
               className={
                 s.collection === "company"
-                  ? "text-[11px] text-tikt-green"
-                  : "text-[11px] italic text-tikt-green/50"
+                  ? "text-[11px] text-tikt-ink"
+                  : "text-[11px] italic text-tikt-muted"
               }
             >
               {s.source}
             </div>
           ))}
           {extra > 0 && (
-            <div className="text-[11px] text-tikt-green/40">+ {extra} more</div>
+            <div className="text-[11px] text-tikt-muted">+ {extra} more</div>
           )}
         </div>
       )}
@@ -691,8 +691,8 @@ export default function Debate() {
   // ───────────────────────────────────────────────────────────────────────
   if (isLoading) {
     return (
-      <div className="flex min-h-0 w-full flex-1 items-center justify-center bg-tikt-cream font-inter">
-        <div className="text-[14px] text-tikt-green/50">Loading debate…</div>
+      <div className="flex min-h-0 w-full flex-1 items-center justify-center bg-tikt-bg font-inter">
+        <div className="text-[14px] text-tikt-muted">Loading debate…</div>
       </div>
     );
   }
@@ -703,31 +703,31 @@ export default function Debate() {
   if (status === "idle" || status === "ingesting") {
     const canStart = selectedAgents.length > 0 && topic.trim().length > 0;
     return (
-      <div className="min-h-0 w-full flex-1 overflow-y-auto bg-tikt-cream font-inter text-tikt-green">
+      <div className="min-h-0 w-full flex-1 overflow-y-auto bg-tikt-bg font-inter text-tikt-ink">
         <div className="mx-auto w-full max-w-[720px] px-8 pb-24 pt-8">
           {/* back */}
           <button
             type="button"
             onClick={() => navigate(`/company/${symbol}`)}
-            className="mb-7 inline-flex items-center gap-1.5 text-[13px] font-medium text-tikt-green/50 hover:text-tikt-green"
+            className="mb-7 inline-flex items-center gap-1.5 text-[13px] font-medium text-tikt-muted hover:text-tikt-ink"
           >
             ← Back
           </button>
 
           {/* header */}
-          <div className="text-[13px] font-semibold uppercase tracking-[2px] text-tikt-gold">
+          <div className="text-[11px] font-semibold uppercase tracking-[2px] text-tikt-muted">
             {symbol}
           </div>
-          <h1 className="mt-1.5 font-display text-[32px] font-bold leading-tight text-tikt-green">
+          <h1 className="mt-1.5 text-[32px] font-bold leading-tight text-tikt-ink">
             {company}
           </h1>
-          <p className="mt-1 text-[14px] text-tikt-green/50">
+          <p className="mt-1 text-[14px] text-tikt-muted">
             Configure your debate
           </p>
 
           {/* SELECT INVESTORS */}
           <div className="mt-8">
-            <div className="text-[11px] font-semibold uppercase tracking-[1.5px] text-tikt-gold">
+            <div className="text-[11px] font-semibold uppercase tracking-[1.5px] text-tikt-muted">
               Select Investors
             </div>
             <div className="mt-3 grid grid-cols-5 gap-3">
@@ -739,23 +739,31 @@ export default function Debate() {
                     key={a.id}
                     onClick={() => toggleAgent(a.id)}
                     aria-pressed={sel}
-                    className={`flex flex-col items-center gap-2 rounded-lg p-4 transition ${
+                    className={`flex flex-col items-center gap-2 rounded-lg border p-4 transition ${
                       sel
-                        ? "border-[1.5px] border-tikt-gold bg-tikt-gold/10"
-                        : "border-[0.5px] border-tikt-green/15 bg-white hover:border-tikt-green/30"
+                        ? "border-tikt-green bg-tikt-green text-tikt-bg"
+                        : "border-tikt-border bg-tikt-surface text-tikt-muted hover:border-tikt-green/50"
                     }`}
                   >
-                    <span className="flex h-12 w-12 items-center justify-center rounded-full bg-tikt-gold text-[15px] font-bold text-tikt-green">
+                    <span
+                      className={`flex h-12 w-12 items-center justify-center rounded-full text-[15px] font-bold ${
+                        sel ? "bg-tikt-bg text-tikt-green" : "bg-tikt-green text-tikt-bg"
+                      }`}
+                    >
                       {a.initials}
                     </span>
-                    <span className="text-center text-[12px] font-medium leading-tight text-tikt-green">
+                    <span
+                      className={`text-center text-[12px] font-medium leading-tight ${
+                        sel ? "text-tikt-bg" : "text-tikt-ink"
+                      }`}
+                    >
                       {a.name}
                     </span>
                     <span
                       className={`flex h-4 w-4 items-center justify-center rounded-[3px] text-[10px] leading-none ${
                         sel
-                          ? "bg-tikt-gold text-tikt-green"
-                          : "border-[0.5px] border-tikt-green/30 text-transparent"
+                          ? "bg-tikt-bg text-tikt-green"
+                          : "border border-tikt-border text-transparent"
                       }`}
                     >
                       ✓
@@ -770,7 +778,7 @@ export default function Debate() {
           <div className="mt-7">
             <label
               htmlFor="debate-topic"
-              className="text-[11px] font-semibold uppercase tracking-[1.5px] text-tikt-gold"
+              className="text-[11px] font-semibold uppercase tracking-[1.5px] text-tikt-muted"
             >
               Debate Topic
             </label>
@@ -780,13 +788,13 @@ export default function Debate() {
               value={topic}
               onChange={(e) => setTopic(e.target.value)}
               placeholder="What should the investors debate?"
-              className="mt-2 w-full resize-none rounded-lg border-[0.5px] border-tikt-green/15 bg-white px-4 py-3 text-[13px] leading-[1.6] text-tikt-green outline-none placeholder:text-tikt-green/40 focus:border-tikt-green"
+              className="mt-2 w-full resize-none rounded-lg border border-tikt-border bg-tikt-panel px-4 py-3 text-[13px] leading-[1.6] text-tikt-ink outline-none placeholder:text-tikt-faint focus:border-tikt-green"
             />
           </div>
 
           {/* TURNS PER AGENT */}
           <div className="mt-7">
-            <div className="text-[11px] font-semibold uppercase tracking-[1.5px] text-tikt-gold">
+            <div className="text-[11px] font-semibold uppercase tracking-[1.5px] text-tikt-muted">
               Turns Per Agent
             </div>
             <div className="mt-2 flex items-center gap-3">
@@ -794,18 +802,18 @@ export default function Debate() {
                 type="button"
                 onClick={() => setTurnsPerAgent((t) => Math.max(1, t - 1))}
                 disabled={turnsPerAgent <= 1}
-                className="flex h-9 w-9 items-center justify-center rounded-lg border-[0.5px] border-tikt-green/15 bg-white text-[18px] leading-none text-tikt-green hover:border-tikt-green disabled:cursor-not-allowed disabled:opacity-40"
+                className="flex h-9 w-9 items-center justify-center rounded-lg border border-tikt-border bg-tikt-panel text-[18px] leading-none text-tikt-ink hover:border-tikt-green disabled:cursor-not-allowed disabled:opacity-40"
               >
                 −
               </button>
-              <span className="w-8 text-center text-[16px] font-semibold tabular-nums text-tikt-green">
+              <span className="w-8 text-center text-[16px] font-semibold tabular-nums text-tikt-ink">
                 {turnsPerAgent}
               </span>
               <button
                 type="button"
                 onClick={() => setTurnsPerAgent((t) => Math.min(5, t + 1))}
                 disabled={turnsPerAgent >= 5}
-                className="flex h-9 w-9 items-center justify-center rounded-lg border-[0.5px] border-tikt-green/15 bg-white text-[18px] leading-none text-tikt-green hover:border-tikt-green disabled:cursor-not-allowed disabled:opacity-40"
+                className="flex h-9 w-9 items-center justify-center rounded-lg border border-tikt-border bg-tikt-panel text-[18px] leading-none text-tikt-ink hover:border-tikt-green disabled:cursor-not-allowed disabled:opacity-40"
               >
                 +
               </button>
@@ -817,7 +825,7 @@ export default function Debate() {
             type="button"
             onClick={startDebate}
             disabled={!canStart || status === "ingesting"}
-            className="mt-8 w-full rounded-none bg-tikt-green px-5 py-3.5 text-[14px] font-semibold tracking-[0.3px] text-tikt-cream hover:bg-tikt-greenDark disabled:cursor-not-allowed disabled:opacity-40"
+            className="mt-8 w-full rounded-none bg-tikt-green px-5 py-3.5 text-[14px] font-semibold tracking-[0.3px] text-tikt-bg hover:bg-tikt-greenDark disabled:cursor-not-allowed disabled:opacity-40"
           >
             Start Debate →
           </button>
@@ -825,7 +833,7 @@ export default function Debate() {
           {/* RESEARCH DOCUMENTS — optional user uploads fed into the debate */}
           {status === "idle" && (
             <div className="mt-7">
-              <div className="text-[11px] font-semibold uppercase tracking-[1.5px] text-tikt-gold">
+              <div className="text-[11px] font-semibold uppercase tracking-[1.5px] text-tikt-muted">
                 Research Documents
               </div>
               <div
@@ -841,12 +849,12 @@ export default function Debate() {
                   e.preventDefault();
                   handleFiles(e.dataTransfer.files);
                 }}
-                className="mt-2 cursor-pointer rounded-lg border-[1.5px] border-dashed border-tikt-gold/50 bg-tikt-cream px-5 py-6 text-center transition hover:border-tikt-gold"
+                className="mt-2 cursor-pointer rounded-lg border border-dashed border-tikt-border bg-tikt-panel px-5 py-6 text-center transition hover:border-tikt-green"
               >
-                <div className="text-[13px] text-tikt-green/50">
+                <div className="text-[13px] text-tikt-muted">
                   Drop files or click to upload
                 </div>
-                <div className="mt-1 text-[11px] text-tikt-green/40">
+                <div className="mt-1 text-[11px] text-tikt-faint">
                   PDF, TXT, MD, or DOCX
                 </div>
               </div>
@@ -866,13 +874,13 @@ export default function Debate() {
                   {uploadedDocs.map((d) => (
                     <span
                       key={d.filename}
-                      className="inline-flex items-center gap-2 rounded-full border-[0.5px] border-tikt-green/15 bg-white px-3 py-1.5 text-[12px] text-tikt-green"
+                      className="inline-flex items-center gap-2 rounded-full border border-tikt-border bg-tikt-surface px-3 py-1.5 text-[12px] text-tikt-ink"
                     >
                       {d.status === "queued" && (
-                        <span className="text-tikt-gold">⏳</span>
+                        <span className="text-tikt-green">⏳</span>
                       )}
                       {d.status === "uploading" && (
-                        <span className="animate-pulse text-tikt-gold">⟳</span>
+                        <span className="animate-pulse text-tikt-green">⟳</span>
                       )}
                       {d.status === "done" && (
                         <span className="text-tikt-pos">✓</span>
@@ -888,7 +896,7 @@ export default function Debate() {
                       <button
                         type="button"
                         onClick={() => removeDoc(d.filename)}
-                        className="text-tikt-green/40 hover:text-tikt-neg"
+                        className="text-tikt-muted hover:text-tikt-neg"
                         aria-label={`Remove ${d.filename}`}
                       >
                         ×
@@ -898,7 +906,7 @@ export default function Debate() {
                 </div>
               )}
               {uploadedDocs.some((d) => d.status === "queued") && (
-                <div className="mt-2 text-[11px] italic text-tikt-green/40">
+                <div className="mt-2 text-[11px] italic text-tikt-muted">
                   Will upload when debate starts
                 </div>
               )}
@@ -907,14 +915,14 @@ export default function Debate() {
 
           {/* INGEST PROGRESS */}
           {status === "ingesting" && (
-            <div className="mt-8 rounded-lg border-[1.5px] border-tikt-gold bg-white p-6">
-              <h2 className="font-display text-[18px] font-bold text-tikt-green">
+            <div className="mt-8 rounded-lg border border-tikt-green/40 bg-tikt-surface p-6">
+              <h2 className="text-[18px] font-bold text-tikt-ink">
                 Preparing Research Data
               </h2>
               <div className="mt-4 flex flex-col gap-2.5">
                 {ingestSteps.length === 0 ? (
-                  <div className="flex items-center gap-2.5 text-[13px] text-tikt-green">
-                    <span className="animate-pulse text-tikt-gold">⟳</span>
+                  <div className="flex items-center gap-2.5 text-[13px] text-tikt-ink">
+                    <span className="animate-pulse text-tikt-green">⟳</span>
                     <span className="animate-pulse">Starting…</span>
                   </div>
                 ) : (
@@ -924,13 +932,13 @@ export default function Debate() {
                       <div
                         key={i}
                         className={`flex items-start gap-2.5 text-[13px] leading-[1.5] ${
-                          isCurrent ? "text-tikt-green" : "text-tikt-green/60"
+                          isCurrent ? "text-tikt-ink" : "text-tikt-muted"
                         }`}
                       >
                         <span
                           className={
                             isCurrent
-                              ? "animate-pulse text-tikt-gold"
+                              ? "animate-pulse text-tikt-green"
                               : "text-tikt-pos"
                           }
                         >
@@ -944,7 +952,7 @@ export default function Debate() {
                   })
                 )}
               </div>
-              <p className="mt-4 text-[12px] text-tikt-green/50">
+              <p className="mt-4 text-[12px] text-tikt-muted">
                 This takes about 90 seconds on first run.
               </p>
             </div>
@@ -960,7 +968,7 @@ export default function Debate() {
   const loadingLabel = status === "running" ? "Debate in progress…" : null;
 
   return (
-    <div className="flex min-h-0 w-full flex-1 overflow-hidden bg-tikt-cream font-inter text-tikt-green">
+    <div className="flex min-h-0 w-full flex-1 overflow-hidden bg-tikt-bg font-inter text-tikt-ink">
       {/* ───────────── LEFT: TRANSCRIPT (70%) ───────────── */}
       <main className="flex-1 overflow-y-auto">
         <div className="w-full max-w-none px-12 pb-24 pt-8">
@@ -968,30 +976,30 @@ export default function Debate() {
           <button
             type="button"
             onClick={() => navigate(`/company/${symbol}`)}
-            className="mb-7 inline-flex items-center gap-1.5 text-[13px] font-medium text-tikt-green/50 hover:text-tikt-green"
+            className="mb-7 inline-flex items-center gap-1.5 text-[13px] font-medium text-tikt-muted hover:text-tikt-ink"
           >
             ← Back
           </button>
 
           {/* header */}
-          <div className="text-[14px] font-semibold uppercase tracking-[2px] text-tikt-gold">
+          <div className="text-[11px] font-semibold uppercase tracking-[2px] text-tikt-muted">
             {symbol} · Debate
           </div>
-          <h1 className="mt-1.5 line-clamp-2 font-display text-[22px] font-bold leading-tight text-tikt-green">
+          <h1 className="mt-1.5 line-clamp-2 text-[22px] font-bold leading-tight text-tikt-ink">
             {topic}
           </h1>
 
           {/* in-progress indicator */}
           {loadingLabel && (
-            <div className="mt-6 flex items-center gap-2.5 text-[13px] font-medium text-tikt-gold">
-              <span className="h-2 w-2 animate-pulse rounded-full bg-tikt-gold" />
+            <div className="mt-6 flex items-center gap-2.5 text-[13px] font-medium text-tikt-green">
+              <span className="h-2 w-2 animate-pulse rounded-full bg-tikt-green" />
               <span className="animate-pulse">{loadingLabel}</span>
             </div>
           )}
 
           {/* error */}
           {status === "error" && (
-            <div className="mt-6 rounded-lg border-[0.5px] border-tikt-neg/40 bg-white px-5 py-4 text-[13px] leading-[1.6] text-tikt-neg">
+            <div className="mt-6 rounded-lg border border-tikt-neg/40 bg-tikt-surface px-5 py-4 text-[13px] leading-[1.6] text-tikt-neg">
               {error || "Something went wrong running the debate."}
             </div>
           )}
@@ -1014,13 +1022,13 @@ export default function Debate() {
                   return (
                     <div key={i} className="my-8 flex flex-col items-center gap-3">
                       <div className="flex w-full items-center gap-4">
-                        <div className="h-px flex-1 bg-tikt-gold/40" />
-                        <span className="text-[11px] font-semibold uppercase tracking-[2px] text-tikt-gold">
+                        <div className="h-px flex-1 bg-tikt-green/40" />
+                        <span className="text-[11px] font-semibold uppercase tracking-[2px] text-tikt-green">
                           Round {t.roundNum}
                         </span>
-                        <div className="h-px flex-1 bg-tikt-gold/40" />
+                        <div className="h-px flex-1 bg-tikt-green/40" />
                       </div>
-                      <p className="max-w-[680px] text-center font-display text-[16px] italic text-tikt-green">
+                      <p className="max-w-[680px] text-center text-[16px] italic text-tikt-ink">
                         {t.topic}
                       </p>
                     </div>
@@ -1031,15 +1039,15 @@ export default function Debate() {
                 if (t.isSystem) {
                   return (
                     <div key={i} className="my-4 flex justify-center">
-                      <div className="flex items-center gap-2.5 rounded-lg border-[0.5px] border-tikt-gold bg-tikt-green/[0.03] px-5 py-3">
+                      <div className="flex items-center gap-2.5 rounded-lg border border-tikt-border bg-tikt-surface px-5 py-3">
                         {t.complete ? (
                           <span className="text-[13px] font-semibold text-tikt-pos">
                             ✓
                           </span>
                         ) : (
-                          <span className="h-2 w-2 animate-pulse rounded-full bg-tikt-gold" />
+                          <span className="h-2 w-2 animate-pulse rounded-full bg-tikt-green" />
                         )}
-                        <span className="text-[13px] italic text-tikt-green">
+                        <span className="text-[13px] italic text-tikt-ink">
                           {t.response}
                         </span>
                       </div>
@@ -1058,11 +1066,11 @@ export default function Debate() {
                   sawSynthesis = false;
                   divider = (
                     <div className="my-4 flex items-center gap-4">
-                      <div className="h-px flex-1 bg-tikt-green/15" />
-                      <span className="text-[11px] font-semibold uppercase tracking-[2px] text-tikt-gold">
+                      <div className="h-px flex-1 bg-tikt-border" />
+                      <span className="text-[11px] font-semibold uppercase tracking-[2px] text-tikt-green">
                         Round {roundNo}
                       </span>
-                      <div className="h-px flex-1 bg-tikt-green/15" />
+                      <div className="h-px flex-1 bg-tikt-border" />
                     </div>
                   );
                 }
@@ -1072,10 +1080,10 @@ export default function Debate() {
                   <Fragment key={i}>
                     {divider}
                     <div
-                      className={`mb-6 flex gap-5 rounded-xl border border-tikt-green/15 p-6 ${
-                        t.complete ? "bg-white" : "bg-tikt-gold/[0.03]"
+                      className={`mb-6 flex gap-5 rounded-lg border border-tikt-border p-6 ${
+                        t.complete ? "bg-tikt-surface" : "bg-tikt-panel"
                       } ${
-                        isSynthesis ? "border-l-[3px] border-l-tikt-gold" : ""
+                        isSynthesis ? "border-l-[3px] border-l-tikt-green" : ""
                       }`}
                     >
                       {/* left column — avatar (80px fixed) */}
@@ -1083,13 +1091,13 @@ export default function Debate() {
                         <span
                           className={`flex h-16 w-16 items-center justify-center rounded-full text-[18px] font-bold ${
                             isSynthesis
-                              ? "bg-tikt-green text-tikt-cream"
-                              : "bg-tikt-gold text-tikt-green"
+                              ? "border border-tikt-green bg-tikt-panel text-tikt-green"
+                              : "bg-tikt-green text-tikt-bg"
                           }`}
                         >
                           {mono}
                         </span>
-                        <span className="mt-2 text-center text-[11px] leading-tight tracking-[1px] text-tikt-green/50">
+                        <span className="mt-2 text-center text-[11px] leading-tight tracking-[1px] text-tikt-muted">
                           {isSynthesis ? "SYNTHESIS" : name}
                         </span>
                       </div>
@@ -1100,7 +1108,7 @@ export default function Debate() {
                           className={`text-[14px] font-bold ${
                             isSynthesis
                               ? "italic text-tikt-green"
-                              : "text-tikt-gold"
+                              : "text-tikt-green"
                           }`}
                         >
                           {isSynthesis ? "ANALYST SYNTHESIS" : name}
@@ -1124,17 +1132,17 @@ export default function Debate() {
 
           {/* complete banner */}
           {status === "complete" && (
-            <div className="mt-6 rounded-lg border-[0.5px] border-tikt-gold bg-tikt-gold/10 px-5 py-4 text-center text-[12px] font-semibold uppercase tracking-[2px] text-tikt-gold">
+            <div className="mt-6 rounded-lg border border-tikt-green/40 bg-tikt-green/10 px-5 py-4 text-center text-[12px] font-semibold uppercase tracking-[2px] text-tikt-green">
               Debate complete
             </div>
           )}
 
           {/* follow-up — ask another question to continue the debate */}
           {status === "complete" && (
-            <div className="mt-6 rounded-lg border-[1.5px] border-tikt-gold bg-white p-5">
+            <div className="mt-6 rounded-lg border border-tikt-green/40 bg-tikt-surface p-5">
               <label
                 htmlFor="follow-up"
-                className="text-[11px] font-semibold uppercase tracking-[1.5px] text-tikt-gold"
+                className="text-[11px] font-semibold uppercase tracking-[1.5px] text-tikt-muted"
               >
                 Ask a Follow-up
               </label>
@@ -1144,13 +1152,13 @@ export default function Debate() {
                 value={followUpTopic}
                 onChange={(e) => setFollowUpTopic(e.target.value)}
                 placeholder="What else should they debate?"
-                className="mt-2 w-full resize-none rounded-lg border-[0.5px] border-tikt-green/15 bg-white px-4 py-3 text-[13px] leading-[1.6] text-tikt-green outline-none placeholder:text-tikt-green/40 focus:border-tikt-green"
+                className="mt-2 w-full resize-none rounded-lg border border-tikt-border bg-tikt-panel px-4 py-3 text-[13px] leading-[1.6] text-tikt-ink outline-none placeholder:text-tikt-faint focus:border-tikt-green"
               />
               <button
                 type="button"
                 onClick={continueDebate}
                 disabled={!followUpTopic.trim()}
-                className="mt-3 w-full rounded-none bg-tikt-green px-5 py-3 text-[14px] font-semibold tracking-[0.3px] text-tikt-cream hover:bg-tikt-greenDark disabled:cursor-not-allowed disabled:opacity-40"
+                className="mt-3 w-full rounded-none bg-tikt-green px-5 py-3 text-[14px] font-semibold tracking-[0.3px] text-tikt-bg hover:bg-tikt-greenDark disabled:cursor-not-allowed disabled:opacity-40"
               >
                 Continue Debate →
               </button>
@@ -1159,7 +1167,7 @@ export default function Debate() {
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                className="mt-3 text-[12px] font-medium text-tikt-gold hover:text-tikt-goldHover"
+                className="mt-3 text-[12px] font-medium text-tikt-green hover:text-tikt-greenDark"
               >
                 + Add research document
               </button>
@@ -1179,12 +1187,12 @@ export default function Debate() {
                   {uploadedDocs.map((d) => (
                     <div key={d.filename} className="text-[12px]">
                       {d.status === "uploading" && (
-                        <span className="animate-pulse text-tikt-gold/70">
+                        <span className="animate-pulse text-tikt-green/70">
                           Uploading {d.filename}…
                         </span>
                       )}
                       {d.status === "done" && (
-                        <span className="text-tikt-gold/70">
+                        <span className="text-tikt-green/70">
                           {d.filename} added to research context
                         </span>
                       )}
@@ -1200,13 +1208,31 @@ export default function Debate() {
             </div>
           )}
 
+          {/* download — export this debate transcript as a PDF (new tab) */}
+          {status === "complete" && sessionId && (
+            <div className="mt-4 text-center">
+              <button
+                type="button"
+                onClick={() =>
+                  window.open(
+                    `${API_BASE}/debate/${sessionId}/export-pdf`,
+                    "_blank"
+                  )
+                }
+                className="text-[12px] font-medium text-tikt-green hover:text-tikt-greenDark"
+              >
+                ↓ Download as PDF
+              </button>
+            </div>
+          )}
+
           {/* scroll sentinel */}
           <div ref={endRef} />
         </div>
       </main>
 
       {/* ───────────── RIGHT: SESSION SIDEBAR (30%, sticky) ───────────── */}
-      <aside className="w-[280px] flex-shrink-0 overflow-y-auto border-l-[0.5px] border-tikt-green/15 bg-white/40">
+      <aside className="w-[280px] flex-shrink-0 overflow-y-auto border-l border-tikt-border bg-tikt-surface">
         <div className="sticky top-0 p-6">
           {/* status indicator */}
           <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[1.5px]">
@@ -1222,40 +1248,40 @@ export default function Debate() {
               </>
             ) : (
               <>
-                <span className="h-2 w-2 animate-pulse rounded-full bg-tikt-gold" />
-                <span className="text-tikt-gold">Running…</span>
+                <span className="h-2 w-2 animate-pulse rounded-full bg-tikt-green" />
+                <span className="text-tikt-green">Running…</span>
               </>
             )}
           </div>
 
           {/* session info card */}
-          <div className="mt-5 rounded-lg border-[0.5px] border-tikt-green/15 bg-white p-5">
-            <div className="text-[10px] font-semibold uppercase tracking-[1.5px] text-tikt-green/50">
+          <div className="mt-5 rounded-lg border border-tikt-border bg-tikt-panel p-5">
+            <div className="text-[10px] font-semibold uppercase tracking-[1.5px] text-tikt-muted">
               Session
             </div>
 
             <dl className="mt-3 flex flex-col gap-3">
               <div>
-                <dt className="text-[10px] font-semibold uppercase tracking-[1px] text-tikt-green/40">
+                <dt className="text-[10px] font-semibold uppercase tracking-[1px] text-tikt-muted">
                   Ticker
                 </dt>
-                <dd className="mt-0.5 text-[13px] font-semibold text-tikt-green">
+                <dd className="mt-0.5 text-[13px] font-semibold text-tikt-ink">
                   {symbol}
                 </dd>
               </div>
               <div>
-                <dt className="text-[10px] font-semibold uppercase tracking-[1px] text-tikt-green/40">
+                <dt className="text-[10px] font-semibold uppercase tracking-[1px] text-tikt-muted">
                   Company
                 </dt>
-                <dd className="mt-0.5 text-[13px] font-semibold text-tikt-green">
+                <dd className="mt-0.5 text-[13px] font-semibold text-tikt-ink">
                   {company}
                 </dd>
               </div>
               <div>
-                <dt className="text-[10px] font-semibold uppercase tracking-[1px] text-tikt-green/40">
+                <dt className="text-[10px] font-semibold uppercase tracking-[1px] text-tikt-muted">
                   Topic
                 </dt>
-                <dd className="mt-0.5 text-[13px] leading-[1.5] text-tikt-green/80">
+                <dd className="mt-0.5 text-[13px] leading-[1.5] text-tikt-ink">
                   {topic}
                 </dd>
               </div>
@@ -1263,7 +1289,7 @@ export default function Debate() {
 
             {/* agents */}
             <div className="mt-5">
-              <div className="text-[10px] font-semibold uppercase tracking-[1px] text-tikt-green/40">
+              <div className="text-[10px] font-semibold uppercase tracking-[1px] text-tikt-muted">
                 Agents
               </div>
               <div className="mt-3 flex flex-col gap-2.5">
@@ -1271,10 +1297,10 @@ export default function Debate() {
                   const name = displayName(a);
                   return (
                     <div key={a} className="flex items-center gap-2.5">
-                      <span className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-tikt-gold text-[11px] font-bold text-tikt-green">
+                      <span className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-tikt-green text-[11px] font-bold text-tikt-bg">
                         {initials(name)}
                       </span>
-                      <span className="text-[13px] font-medium text-tikt-green">
+                      <span className="text-[13px] font-medium text-tikt-ink">
                         {name}
                       </span>
                     </div>
@@ -1285,17 +1311,17 @@ export default function Debate() {
           </div>
 
           {/* sources placeholder */}
-          <div className="mt-5 rounded-lg border-[0.5px] border-tikt-green/15 bg-white p-5">
-            <div className="text-[10px] font-semibold uppercase tracking-[1.5px] text-tikt-green/50">
+          <div className="mt-5 rounded-lg border border-tikt-border bg-tikt-panel p-5">
+            <div className="text-[10px] font-semibold uppercase tracking-[1.5px] text-tikt-muted">
               Sources
             </div>
-            <div className="mt-3 text-[13px] italic text-tikt-green/50">
+            <div className="mt-3 text-[13px] italic text-tikt-muted">
               Loading sources…
             </div>
           </div>
 
           {sessionId && (
-            <div className="mt-4 text-[10px] uppercase tracking-[1px] text-tikt-green/30">
+            <div className="mt-4 text-[10px] uppercase tracking-[1px] text-tikt-muted">
               Session {sessionId}
             </div>
           )}
